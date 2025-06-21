@@ -76,6 +76,7 @@ def main():
         if sr != model.sample_rate:
             prompt_wav = torchaudio.functional.resample(prompt_wav, sr, model.sample_rate)
         prompt_wav = prompt_wav.mean(dim=0, keepdim=True).to(dtype)
+        prompt_wav = prompt_wav[..., :10*model.sample_rate]
         # breakpoint()
         for i in range(args.n_samples):
             wav = model.generate(lyrics, prompt_wav)
