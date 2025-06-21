@@ -1,5 +1,5 @@
 import os, sys
-import torchaudio
+import torch, torchaudio
 import argparse
 import json
 from omegaconf import MISSING, OmegaConf,DictConfig
@@ -52,13 +52,15 @@ def main():
     parser.add_argument("--input-jsonl", type=str, required=True)
     parser.add_argument("--output-dir", type=str, default="./output")
     parser.add_argument("--n-samples", type=int, default=2)
+    parser.add_argument("--dtype", type=str, default='float32', choices=['float32', 'bfloat16'])
     
     args = parser.parse_args()
 
     hf_download(args.repo_id, args.model_name, args.local_dir)
     cfg = load_config(f"{args.local_dir}/{args.model_name}.yaml", parent_dir=args.local_dir)
   
-    model = SongBloom_Sampler.build_from_trainer(cfg, strict=True)
+    dtype = torch.float32 if args.dtype == 'float32' else torch.bfloat16
+    model = SongBloom_Sampler.build_from_trainer(cfg, strict=True, dtype=dtype)
     model.set_generation_params(**cfg.inference)
           
     os.makedirs(args.output_dir, exist_ok=True)
@@ -73,11 +75,11 @@ def main():
         prompt_wav, sr = torchaudio.load(prompt_wav)
         if sr != model.sample_rate:
             prompt_wav = torchaudio.functional.resample(prompt_wav, sr, model.sample_rate)
-        prompt_wav = prompt_wav.mean(dim=0, keepdim=True)
+        prompt_wav = prompt_wav.mean(dim=0, keepdim=True).to(dtype)
         # breakpoint()
         for i in range(args.n_samples):
             wav = model.generate(lyrics, prompt_wav)
-            torchaudio.save(f'{args.output_dir}/{idx}_s{i}.flac', wav[0].cpu(), model.sample_rate)
+            torchaudio.save(f'{args.output_dir}/{idx}_s{i}.flac', wav[0].cpu().float(), model.sample_rate)
 
 
 if __name__ == "__main__":

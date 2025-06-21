@@ -81,7 +81,7 @@ class SongBloom_Sampler:
         self._progress_callback: tp.Optional[tp.Callable[[int, int], None]] = None
 
     @classmethod
-    def build_from_trainer(cls, cfg, strict=True):
+    def build_from_trainer(cls, cfg, strict=True, dtype=torch.float32):
         model_light = SongBloom_PL(cfg)
         incompatible = model_light.load_state_dict(torch.load(cfg.pretrained_path, map_location='cpu'), strict=strict)
         
@@ -89,7 +89,7 @@ class SongBloom_Sampler:
     
         print(incompatible)
         
-        model_light = model_light.eval().cuda()    
+        model_light = model_light.eval().cuda().to(dtype=dtype)  
         model = cls(
             compression_model = model_light.vae,
             diffusion = model_light.model,
