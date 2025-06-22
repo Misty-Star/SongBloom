@@ -45,6 +45,11 @@ The details about lyric format can be found in [docs/lyric_format.md](docs/lyric
 source set_env.sh
 
 python3 infer.py --input-jsonl example/test.jsonl
+
+# For GPUs with low VRAM like RTX4090, you should set the dtype as bfloat16
+python3 infer.py --input-jsonl example/test.jsonl --dtype bfloat16
+
+# SongBloom also supports flash-attn (optional). To enable it, please install flash-attn (v2.6.3 is used during training) manually and set os.environ['DISABLE_FLASH_ATTN'] = "0" in infer.py:8
 ```
 
 ## TODO List
