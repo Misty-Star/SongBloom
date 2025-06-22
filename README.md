@@ -53,9 +53,15 @@ python3 infer.py --input-jsonl example/test.jsonl
 
 ## Citation
 
-> @article{yang2025songbloom,
-title={SongBloom: Coherent Song Generation via Interleaved Autoregressive Sketching and Diffusion Refinement},
-author={Yang, Chenyu and Wang, Shuai and Chen, Hangting and Tan, Wei and Yu, Jianwei and Li, Haizhou},
-journal={arXiv preprint arXiv:2506.07634},
-year={2025}
+```
+@article{ning2025diffrhythm,
+  title={{DiffRhythm}: Blazingly Fast and Embarrassingly Simple End-to-End Full-Length Song Generation with Latent Diffusion},
+  author={Ziqian, Ning and Huakang, Chen and Yuepeng, Jiang and Chunbo, Hao and Guobin, Ma and Shuai, Wang and Jixun, Yao and Lei, Xie},
+  journal={arXiv preprint arXiv:2503.01183},
+  year={2025}
 }
+```
+
+## License
+
+SongBloom (codes and weights) is released under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). 
