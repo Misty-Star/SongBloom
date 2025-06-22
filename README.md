@@ -48,3 +48,14 @@ python3 infer.py --input-jsonl example/test.jsonl
 ```
 
 ## TODO List
+
+- [ ] Support Text Description
+
+## Citation
+
+> @article{yang2025songbloom,
+title={SongBloom: Coherent Song Generation via Interleaved Autoregressive Sketching and Diffusion Refinement},
+author={Yang, Chenyu and Wang, Shuai and Chen, Hangting and Tan, Wei and Yu, Jianwei and Li, Haizhou},
+journal={arXiv preprint arXiv:2506.07634},
+year={2025}
+}
