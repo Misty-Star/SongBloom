@@ -9,7 +9,7 @@
 
 [![Paper](https://img.shields.io/badge/arXiv-2506.07634-b31b1b.svg)](https://arxiv.org/abs/2506.07634)
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Models-yellow)](https://huggingface.co/CypressYang/SongBloom)
-[![Demo Page](https://img.shields.io/badge/Demo-Audio%20Samples-green)](https://www.apache.org/licenses/LICENSE-2.0)
+[![Demo Page](https://img.shields.io/badge/Demo-Audio%20Samples-green)](https://cypress-yang.github.io/SongBloom_demo)
 
 </div>
 
