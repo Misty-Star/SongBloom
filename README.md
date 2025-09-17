@@ -81,13 +81,6 @@ python3 infer.py --input-jsonl example/test.jsonl --dtype bfloat16
 # SongBloom also supports flash-attn (optional). To enable it, please install flash-attn (v2.6.3 is used during training) manually and set os.environ['DISABLE_FLASH_ATTN'] = "0" in infer.py:8
 ```
 
-  
-
-## TODO List
-
-- [ ] Support Text Description
-- [ ] Full version
-
 
 ## Citation
 
