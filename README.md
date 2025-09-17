@@ -1,4 +1,17 @@
-# [SongBloom]: *Coherent Song Generation via Interleaved Autoregressive Sketching and Diffusion Refinement*
+
+
+<p align="center"><img src="docs/icon.png" width="50%"></p>
+
+
+# **SongBloom**: *Coherent Song Generation via Interleaved Autoregressive Sketching and Diffusion Refinement*
+
+<div align="center">
+
+[![Paper](https://img.shields.io/badge/arXiv-2506.07634-b31b1b.svg)](https://arxiv.org/abs/2506.07634)
+[![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Models-yellow)](https://huggingface.co/CypressYang/SongBloom)
+[![Demo Page](https://img.shields.io/badge/Demo-Audio%20Samples-green)](https://www.apache.org/licenses/LICENSE-2.0)
+
+</div>
 
 We propose **SongBloom**, a novel framework for full-length song generation that leverages an interleaved paradigm of autoregressive sketching and diffusion-based refinement. SongBloom employs an autoregressive diffusion model that combines the high fidelity of diffusion models with the scalability of language models.
 Specifically, it gradually extends a musical sketch from short to long and refines the details from coarse to fine-grained. The interleaved generation paradigm effectively integrates prior semantic and acoustic context to guide the generation process.
@@ -6,11 +19,27 @@ Experimental results demonstrate that SongBloom outperforms existing methods acr
 
 ![img](docs/architecture.png)
 
-Demo page:  [https://cypress-yang.github.io/SongBloom_demo](https://cypress-yang.github.io/SongBloom_demo)
 
-ArXiv: [https://arxiv.org/abs/2506.07634](https://arxiv.org/abs/2506.07634)
 
-## Prepare Environments
+## Models
+
+| Name                 | Size | Max Length | Prompt type | 🤗                                            |
+| -------------------- | ---- | ---------- | ----------- | -------------------------------------------- |
+| songbloom_full_150s  | 2B   | 2m30s      | 10s wav     | [link](https://huggingface.co/CypressYang/SongBloom) |
+| songbloom_full_150s_dpo  | 2B   | 2m30s      | 10s wav     | [link](https://huggingface.co/CypressYang/SongBloom) |
+| songbloom_mulan_150s | 2B   | 2m30s      | 10s wav / text description |           coming soon                           |
+| ... |      |            |             |                                              |
+
+
+## Updates
+- **Jun 2025**: Release the songbloom_full_150s and inference script
+- **Sep 2025**: Release the songbloom_full_150s model with DPO post-training
+
+
+
+## Getting Started
+
+### Prepare Environments
 
 ```bash
 conda create -n SongBloom python==3.8.12
@@ -21,7 +50,7 @@ conda activate SongBloom
 pip install -r requirements.txt
 ```
 
-## Data Preparation
+### Data Preparation
 
 A  .jsonl file, where each line is a json object:
 
@@ -37,9 +66,9 @@ One example can be refered to as: [example/test.jsonl](example/test.jsonl)
 
 The prompt wav should be a 10-second, 48kHz audio clip.
 
-The details about lyric format can be found in [docs/lyric_format.md](docs/lyric_format.md).
+For details on lyric formatting, see [docs/lyric_format.md](docs/lyric_format.md).
 
-## Inference
+### Inference
 
 ```bash
 source set_env.sh
@@ -52,9 +81,13 @@ python3 infer.py --input-jsonl example/test.jsonl --dtype bfloat16
 # SongBloom also supports flash-attn (optional). To enable it, please install flash-attn (v2.6.3 is used during training) manually and set os.environ['DISABLE_FLASH_ATTN'] = "0" in infer.py:8
 ```
 
+  
+
 ## TODO List
 
 - [ ] Support Text Description
+- [ ] Full version
+
 
 ## Citation
 

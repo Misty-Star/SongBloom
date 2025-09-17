@@ -8,20 +8,30 @@ from huggingface_hub import hf_hub_download
 os.environ['DISABLE_FLASH_ATTN'] = "1"
 from SongBloom.models.songbloom.songbloom_pl import SongBloom_Sampler
 
+NAME2REPO = {
+    "songbloom_full_150s" : "CypressYang/SongBloom",
+    "songbloom_full_150s_dpo" : "CypressYang/SongBloom"
+}
 
-def hf_download(repo_id="CypressYang/SongBloom", model_name="songbloom_full_150s", local_dir="./cache", **kwargs):
+def hf_download(model_name="songbloom_full_150s", local_dir="./cache", **kwargs):
+    
+    repo_id = NAME2REPO[model_name]
+    
     cfg_path = hf_hub_download(
         repo_id=repo_id, filename=f"{model_name}.yaml", local_dir=local_dir, **kwargs)
     ckpt_path = hf_hub_download(
         repo_id=repo_id, filename=f"{model_name}.pt", local_dir=local_dir, **kwargs)
     
+    
     vae_cfg_path = hf_hub_download(
-        repo_id=repo_id, filename="stable_audio_1920_vae.json", local_dir=local_dir, **kwargs)
+        repo_id="CypressYang/SongBloom", filename="stable_audio_1920_vae.json", local_dir=local_dir, **kwargs)
     vae_ckpt_path = hf_hub_download(
-        repo_id=repo_id, filename="autoencoder_music_dsp1920.ckpt", local_dir=local_dir, **kwargs)
+        repo_id="CypressYang/SongBloom", filename="autoencoder_music_dsp1920.ckpt", local_dir=local_dir, **kwargs)
     
     g2p_path = hf_hub_download(
-        repo_id=repo_id, filename="vocab_g2p.yaml", local_dir=local_dir, **kwargs)
+        repo_id="CypressYang/SongBloom", filename="vocab_g2p.yaml", local_dir=local_dir, **kwargs)
+    
+    return 
     
 
     
@@ -46,7 +56,6 @@ def load_config(cfg_file, parent_dir="./") -> DictConfig:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--repo-id", type=str, default="CypressYang/SongBloom")
     parser.add_argument("--model-name", type=str, default="songbloom_full_150s")
     parser.add_argument("--local-dir", type=str, default="./cache")
     parser.add_argument("--input-jsonl", type=str, required=True)
@@ -56,9 +65,11 @@ def main():
     
     args = parser.parse_args()
 
-    hf_download(args.repo_id, args.model_name, args.local_dir)
+    hf_download(args.model_name, args.local_dir)
     cfg = load_config(f"{args.local_dir}/{args.model_name}.yaml", parent_dir=args.local_dir)
   
+    cfg.max_dur = cfg.max_dur + 20
+    
     dtype = torch.float32 if args.dtype == 'float32' else torch.bfloat16
     model = SongBloom_Sampler.build_from_trainer(cfg, strict=True, dtype=dtype)
     model.set_generation_params(**cfg.inference)
