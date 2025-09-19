@@ -75,12 +75,18 @@ source set_env.sh
 
 python3 infer.py --input-jsonl example/test.jsonl
 
+
 # For GPUs with low VRAM like RTX4090, you should set the dtype as bfloat16
 python3 infer.py --input-jsonl example/test.jsonl --dtype bfloat16
 
 # SongBloom also supports flash-attn (optional). To enable it, please install flash-attn (v2.6.3 is used during training) manually and set os.environ['DISABLE_FLASH_ATTN'] = "0" in infer.py:8
 ```
 
+- model-name: Specify model version, see the model cards (eg: songbloom_full_150s/songbloom_full_150s_dpo);
+- local-dir: Dir where the weights and config files are downloaded;
+- input-jsonl: input raw data;
+- output-dir: Dir where the output audio saved;
+- n-samples: How many audios will be generated for each input term;
 
 ## Citation
 
@@ -95,4 +101,4 @@ year={2025}
 
 ## License
 
-SongBloom (codes and weights) is released under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). 
+SongBloom (codes and weights) is released under the [LICENSE](LICENSE). 
