@@ -85,6 +85,7 @@ def main():
     for test_sample in input_lines:
         # print(test_sample)
         idx, lyrics, prompt_wav = test_sample["idx"], test_sample["lyrics"], test_sample["prompt_wav"]
+        structure_duration = test_sample.get("structure_duration")
         # lyrics = clean_lyrics(lyrics) # This function can handle some wrong cases of lyrics input (not all)
 
         prompt_wav, sr = torchaudio.load(prompt_wav)
@@ -94,7 +95,7 @@ def main():
         prompt_wav = prompt_wav[..., :10*model.sample_rate]
         # breakpoint()
         for i in range(args.n_samples):
-            wav = model.generate(lyrics, prompt_wav)
+            wav = model.generate(lyrics, prompt_wav, structure_duration=structure_duration)
             torchaudio.save(f'{args.output_dir}/{idx}_s{i}.flac', wav[0].cpu().float(), model.sample_rate)
 
 

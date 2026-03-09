@@ -626,7 +626,12 @@ class ConditioningProvider(nn.Module):
             output[attribute] = self.conditioners[attribute].tokenize(batch)
         return output
 
-    def forward(self, tokenized: tp.Dict[str, tp.Any], texts = None) -> tp.Dict[str, ConditionType]:
+    def forward(
+        self,
+        tokenized: tp.Dict[str, tp.Any],
+        texts=None,
+        samples: tp.Optional[tp.List[ConditioningAttributes]] = None,
+    ) -> tp.Dict[str, ConditionType]:
         """Compute pairs of `(embedding, mask)` using the configured conditioners and the tokenized representations.
         The output is for example:
         {
@@ -643,6 +648,12 @@ class ConditioningProvider(nn.Module):
         for attribute, inputs in tokenized.items():
             if attribute == 'self_wav' and texts is not None:
                 condition, mask = self.conditioners[attribute](inputs, texts = texts)
+            elif attribute in self.text_conditions and samples is not None:
+                structure_dur = [sample.text.get("structure_duration") for sample in samples]
+                if any(sd is not None for sd in structure_dur):
+                    condition, mask = self.conditioners[attribute](inputs, structure_dur=structure_dur)
+                else:
+                    condition, mask = self.conditioners[attribute](inputs)
             else:
                 condition, mask = self.conditioners[attribute](inputs)
             output[attribute] = (condition, mask)

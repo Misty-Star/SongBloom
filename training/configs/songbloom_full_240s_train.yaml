@@ -1,0 +1,97 @@
+# SongBloom 240s 训练配置
+# 用法: python -m training.train --config training/configs/songbloom_full_240s_train.yaml
+
+precision: 'bf16-mixed'
+min_dur: 80
+max_dur: 240
+sr: 48000
+
+pretrained_path:  # 留空从头训练，填路径则从预训练权重初始化
+continue_checkpoint:
+
+train_dataset:
+  lyric_processor: phoneme
+  prompt_len: 10
+
+# ============ 训练超参数 ============
+training:
+  lr: 1e-4
+  warmup_steps: 2000
+  max_steps: 150000
+  flow_loss_weight: 0.1
+  accumulate_grad_batches: 32  # 有效 batch = gpu数 * batch_size * accumulate
+  gradient_clip_val: 1.0
+  val_check_interval: 5000
+
+# ============ 数据 ============
+data:
+  train_dir: /path/to/train_data   # 修改为实际路径
+  val_dir: /path/to/val_data       # 可留空
+  batch_size: 4                    # 单卡 batch size
+  num_workers: 4
+
+# ============ VAE ============
+vae:
+  vae_cfg: ./pretrained/stable_audio_1920_vae.json
+  vae_ckpt: ./pretrained/autoencoder_music_dsp1920.ckpt
+  sr: ${sr}
+
+# ============ 模型 ============
+model:
+  block_size: 16
+  latent_dim: 64
+  dim: 1536
+  num_heads: 24
+  lm_layers: 36
+  diff_layers: 12
+  num_pitch: 16384
+  time_cond_type: prepend
+  timestep_features_dim: 256
+  diffusion_objective: rectified_flow
+  timestep_sampler: logit_normal
+  backend: llama
+  rotary_base_val: 40000
+  init_std: 0.02
+  h_dropout: 0.05
+
+  condition_provider_cfg:
+    prompt_wav:
+      type: audio_tokenizer_wrapper
+      output_dim: ${model.dim}
+      audio_tokenizer:
+      max_len: 250
+    lyrics:
+      type: phoneme_tokenizer
+      output_dim: ${model.dim}
+      vocab_list: ${load_yaml:./pretrained/vocab_g2p.yaml}
+      max_len: 1000
+      max_sentence_per_structure: 50
+      max_duration: ${max_dur}
+      interpolate: true
+      mode: sum
+
+  cfg_dropout: 0.1
+  attribute_dropout:
+    text:
+      lyrics: 0.
+    wav:
+      prompt_wav: 0.1
+
+  fuser_cfg:
+    cross_attention_pos_emb: false
+    cross_attention_pos_emb_scale: 1
+    sum: []
+    prepend: [lyrics, prompt_wav]
+    cross: []
+    input_interpolate: []
+
+# ============ 推理（验证时可选） ============
+inference:
+  cfg_coef: 1.5
+  temp: 0.9
+  diff_temp: 0.9
+  top_k: 100
+  penalty_repeat: true
+  penalty_window: 50
+  steps: 36
+  dit_cfg_type: h

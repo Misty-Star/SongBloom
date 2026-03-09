@@ -215,7 +215,7 @@ class PhonemeTokenizerConditioner(TextConditioner):
             else:
                 embeds = torch.cat((content_embeds, structure_embeds, sentence_idx_embeds), -1) # [T, N]
                 
-            if self.interpolate:
+            if self.interpolate or (structure_dur is not None and structure_dur[b] is not None):
                 embeds = self.interpolate_with_structure_duration(tokens, embeds, structure_dur[b])
             embeds_batch.append(embeds)
 

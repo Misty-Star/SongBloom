@@ -510,7 +510,7 @@ class MVSA_DiTAR(StreamingModule):
         null_conditions = ClassifierFreeGuidanceDropout(p=1.0)(conditions)
         conditions = conditions + null_conditions
         tokenized = self.condition_provider.tokenize(conditions)
-        condition_tensors = self.condition_provider(tokenized)          
+        condition_tensors = self.condition_provider(tokenized, samples=conditions)          
         
         
         sequence = self.bos_token.reshape(1,1,-1).expand(B, 1, -1)

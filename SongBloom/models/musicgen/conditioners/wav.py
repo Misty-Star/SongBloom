@@ -44,6 +44,8 @@ class AudioTokenizerConditioner(WaveformConditioner):
     def forward(self, x: WavCondition):
         wav, lengths, *_ = x
         B = wav.shape[0]
+        if wav.dim() == 3 and wav.shape[1] > 1:
+            wav = wav.mean(dim=1, keepdim=True)
         wav = wav.reshape(B, self.code_depth, -1)
         # print(wav.shape)
         # import torchaudio
@@ -73,4 +75,3 @@ class AudioTokenizerConditioner(WaveformConditioner):
         
         return audio_latents, mask
      
-

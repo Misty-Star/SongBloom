@@ -1,4 +1,50 @@
+# Python
 **/__pycache__/
-output
-cache
-third_party
+*.pyc
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# 模型权重
+*.pt
+*.ckpt
+*.safetensors
+
+# 音频产物
+*.wav
+*.mp3
+*.flac
+
+# 训练日志
+wandb/
+runs/
+logs/
+tensorboard/
+
+# 项目目录
+output/
+cache/
+third_party/
+pretrained/
+gpt2/
+wikitext/
+
+# 环境与配置
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# AI Docs
+AGENT.md
+CLAUDE.md
+llmdoc/
+references/

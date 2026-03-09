@@ -1,5 +1,6 @@
 
 from functools import partial
+import math
 import typing as tp
 import torch
 import torch.nn as nn
@@ -8,6 +9,7 @@ import torchaudio
 import numpy as np
 import random
 from omegaconf import OmegaConf
+from omegaconf import DictConfig
 import copy
 import lightning as pl
 
@@ -16,7 +18,7 @@ import os, sys
 from ..musicgen.conditioners import WavCondition, JointEmbedCondition, ConditioningAttributes
 from ..vae_frontend import StableVAE
 from .songbloom_mvsa import MVSA_DiTAR
-from ...g2p.lyric_common import key2processor, symbols, LABELS
+from ...g2p.lyric_common import key2processor, process_lyric_preserve_labels
 
 
 os.environ['TOKENIZERS_PARALLELISM'] = "false"
@@ -49,10 +51,91 @@ class SongBloom_PL(pl.LightningModule):
         
         
         self.model = MVSA_DiTAR(**model_cfg)
-        # print(self.model)
-        
 
+        # 训练超参数（从 cfg.training 读取，提供默认值）
+        train_cfg = getattr(cfg, 'training', None)
+        if train_cfg is not None:
+            self.lr = getattr(train_cfg, 'lr', 1e-4)
+            self.warmup_steps = getattr(train_cfg, 'warmup_steps', 2000)
+            self.max_steps = getattr(train_cfg, 'max_steps', 150000)
+            self.flow_loss_weight = getattr(train_cfg, 'flow_loss_weight', 0.1)
+        else:
+            self.lr = 1e-4
+            self.warmup_steps = 2000
+            self.max_steps = 150000
+            self.flow_loss_weight = 0.1
 
+    def training_step(self, batch, batch_idx):
+        x_sketch, x_latent, x_len, attributes = batch
+
+        # CFG dropout on conditions
+        attributes = [self.model.cfg_dropout(attr) for attr in attributes]
+        attributes = [self.model.att_dropout(attr) for attr in attributes]
+
+        # Condition encoding: tokenize → forward
+        tokenized = self.model.condition_provider.tokenize(attributes)
+        condition_tensors = self.model.condition_provider(tokenized, samples=attributes)
+
+        # Forward pass
+        output = self.model(x_sketch, x_latent, x_len, condition_tensors)
+
+        # Loss computation
+        # ar_logit: (B, T, num_pitch) → transpose for cross_entropy
+        L_LM = F.cross_entropy(
+            output.ar_logit.reshape(-1, output.ar_logit.size(-1)),
+            output.ar_target.reshape(-1),
+            ignore_index=self.model.special_token_id,
+        )
+        L_flow = F.mse_loss(output.nar_pred, output.nar_target)
+        loss = L_LM + self.flow_loss_weight * L_flow
+
+        self.log_dict({
+            "train/loss": loss,
+            "train/L_LM": L_LM,
+            "train/L_flow": L_flow,
+        }, prog_bar=True, sync_dist=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        x_sketch, x_latent, x_len, attributes = batch
+
+        tokenized = self.model.condition_provider.tokenize(attributes)
+        condition_tensors = self.model.condition_provider(tokenized, samples=attributes)
+
+        output = self.model(x_sketch, x_latent, x_len, condition_tensors)
+
+        L_LM = F.cross_entropy(
+            output.ar_logit.reshape(-1, output.ar_logit.size(-1)),
+            output.ar_target.reshape(-1),
+            ignore_index=self.model.special_token_id,
+        )
+        L_flow = F.mse_loss(output.nar_pred, output.nar_target)
+        loss = L_LM + self.flow_loss_weight * L_flow
+
+        self.log_dict({
+            "val/loss": loss,
+            "val/L_LM": L_LM,
+            "val/L_flow": L_flow,
+        }, prog_bar=True, sync_dist=True)
+        return loss
+
+    def configure_optimizers(self):
+        # 排除 VAE 参数（已冻结）
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        optimizer = torch.optim.AdamW(params, lr=self.lr, betas=(0.9, 0.95), weight_decay=0.1)
+
+        # Cosine schedule with linear warmup
+        def lr_lambda(step):
+            if step < self.warmup_steps:
+                return step / max(1, self.warmup_steps)
+            progress = (step - self.warmup_steps) / max(1, self.max_steps - self.warmup_steps)
+            return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
+        }
 
 
 
@@ -124,7 +207,12 @@ class SongBloom_Sampler:
 
     # Mulan Inference
     @torch.no_grad()
-    def generate(self, lyrics, prompt_wav) -> tp.Union[torch.Tensor, tp.Tuple[torch.Tensor, torch.Tensor]]:
+    def generate(
+        self,
+        lyrics,
+        prompt_wav,
+        structure_duration: tp.Optional[tp.List[tp.List[tp.Union[str, float]]]] = None,
+    ) -> tp.Union[torch.Tensor, tp.Tuple[torch.Tensor, torch.Tensor]]:
         """ Generate samples conditioned on text and melody.
         """
         # breakpoint()
@@ -134,6 +222,8 @@ class SongBloom_Sampler:
             
         attributes, _ = self._prepare_tokens_and_attributes(conditions={"lyrics": [self._process_lyric(lyrics)], "prompt_wav": [prompt_wav]}, 
                                                                         prompt=None, prompt_tokens=None)
+        if structure_duration is not None:
+            attributes[0].text["structure_duration"] = structure_duration
 
         # breakpoint()
         print(self.generation_params)
@@ -146,18 +236,7 @@ class SongBloom_Sampler:
     
 
     def _process_lyric(self, input_lyric):
-        if self.lyric_processor_key == 'pinyin':
-            processed_lyric = self.lyric_processor(input_lyric)
-        else:
-            processed_lyric = []
-            check_lyric = input_lyric.split(" ")
-            for ii in range(len(check_lyric)):
-                if check_lyric[ii] not in symbols and check_lyric[ii] not in LABELS.keys() and len(check_lyric[ii]) > 0:
-                    new = self.lyric_processor(check_lyric[ii])
-                    check_lyric[ii] = new
-            processed_lyric = " ".join(check_lyric)
-        
-        return processed_lyric
+        return process_lyric_preserve_labels(input_lyric, self.lyric_processor_key)
     
     @torch.no_grad()
     def _prepare_tokens_and_attributes(
@@ -228,4 +307,3 @@ class SongBloom_Sampler:
             prompt_tokens = None
 
         return attributes, prompt_tokens
-

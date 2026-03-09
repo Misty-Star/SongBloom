@@ -9,6 +9,25 @@ key2processor = {
     'phoneme': G2P_Mix(),
 }
 
+
+def process_lyric_preserve_labels(input_lyric, lyric_processor_key='phoneme'):
+    processor = key2processor.get(lyric_processor_key)
+    if processor is None:
+        raise KeyError(f"Unknown lyric processor: {lyric_processor_key}")
+
+    normalized_lyric = input_lyric.replace("\n", " ").replace("\t", " ")
+
+    if lyric_processor_key == 'pinyin':
+        return processor(normalized_lyric)
+
+    processed_lyric = []
+    check_lyric = normalized_lyric.split(" ")
+    for index, token in enumerate(check_lyric):
+        if token not in symbols and token not in LABELS.keys() and len(token) > 0:
+            check_lyric[index] = processor(token)
+    processed_lyric = " ".join(check_lyric)
+    return processed_lyric
+
 valid_struct_type = ['[chorus]', '[verse]', '[bridge]']
 start_struct_type = ['[intro]', '[start]']
 end_struct_type = ['[outro]', '[end]']
