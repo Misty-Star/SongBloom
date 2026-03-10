@@ -49,6 +49,13 @@ python -m training.preprocess.build_dataset \
 6. 提取 `prompt_wav.flac`、`x_latent.pt`、`x_sketch.pt`
 7. 写出最终 `meta.json`
 
+其中歌词清洗阶段会优先过滤常见的：
+
+- LRC 元数据标签，如 `[ar:...]`、`[ti:...]`、`[al:...]`、`[by:...]`
+- 带时间戳的署名行，如 `[00:00.00]作词：...`
+- 常见创作/制作署名，如 `作词/作曲/编曲/制作人/混音/母带/录音`
+- 常见平台噪声文本，如“贡献歌词”“期待您的精彩评论”“该歌曲为纯音乐，请欣赏”
+
 ## 单阶段脚本
 
 - `python -m training.preprocess.align_lyrics`
