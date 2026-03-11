@@ -20,6 +20,33 @@
 - `language`：WhisperX 语言提示
 - `prompt_start_sec` / `prompt_path`：保留给上游数据准备使用
 
+如果你的原始数据是“同一目录下成对出现的 `.flac` 和同名 `.lrc`”，可以先自动生成 manifest：
+
+```bash
+python -m training.preprocess.make_manifest_from_folder \
+  --source-dir /path/to/song_folder \
+  --output-dir /path/to/manifests
+```
+
+默认会：
+
+- 递归扫描 `source-dir` 下所有 `.flac`
+- 查找同名 `.lrc`
+- 生成 `output-dir/raw_manifest.jsonl`
+- 如果 manifest 已存在，则追加新样本并按 `audio_path`/`id` 去重
+
+生成的每行至少包含：
+
+```json
+{
+  "id": "song_name_ab12cd34ef56...",
+  "audio_path": "/abs/path/to/song.flac",
+  "lyrics_raw": "原始 lrc 内容"
+}
+```
+
+其中 `id` 默认由“歌曲文件名 slug + 绝对路径 sha1 前 16 位”组成，适合多次从不同源目录追加数据时避免冲突。
+
 ## 主流程
 
 ```bash
