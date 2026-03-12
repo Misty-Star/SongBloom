@@ -54,6 +54,25 @@ def load_muq_model(model_name="OpenMuQ/MuQ-large-msd-iter", device="cuda:0"):
     return model.eval().to(device)
 
 
+def unwrap_muq_output(output) -> torch.Tensor:
+    """兼容不同 MuQ 版本的返回值。
+
+    期望最终返回形状为 `(B, T, D)` 的 embedding 张量。
+    """
+    if isinstance(output, torch.Tensor):
+        return output
+    if hasattr(output, "last_hidden_state") and output.last_hidden_state is not None:
+        return output.last_hidden_state
+    if isinstance(output, dict):
+        if "last_hidden_state" in output and output["last_hidden_state"] is not None:
+            return output["last_hidden_state"]
+        if "hidden_states" in output and output["hidden_states"]:
+            return output["hidden_states"][-1]
+    if hasattr(output, "hidden_states") and output.hidden_states:
+        return output.hidden_states[-1]
+    raise TypeError(f"Unsupported MuQ output type: {type(output)!r}")
+
+
 def extract_muq_embeddings(model, wav: torch.Tensor, sr: int = 48000) -> torch.Tensor:
     """提取 MuQ 嵌入。
 
@@ -69,10 +88,11 @@ def extract_muq_embeddings(model, wav: torch.Tensor, sr: int = 48000) -> torch.T
     if wav.shape[0] > 1:
         wav = wav.mean(dim=0, keepdim=True)
     if sr != 16000:
-        wav = torchaudio.functional.resample(wav, sr, 16000)
+        wav = torchaudio.transforms.Resample(sr, 16000)(wav)
 
     with torch.no_grad():
-        embeddings = model(wav.unsqueeze(0).to(next(model.parameters()).device))
+        outputs = model(wav.unsqueeze(0).to(next(model.parameters()).device))
+        embeddings = unwrap_muq_output(outputs)
 
     return embeddings
 
@@ -104,7 +124,7 @@ def main():
 
         wav, sr = torchaudio.load(os.path.join(args.audio_dir, fname))
         if sr != args.sr:
-            wav = torchaudio.functional.resample(wav, sr, args.sr)
+            wav = torchaudio.transforms.Resample(sr, args.sr)(wav)
 
         # MuQ 嵌入提取
         embeddings = extract_muq_embeddings(muq, wav, args.sr)  # (1, T_muq, D)

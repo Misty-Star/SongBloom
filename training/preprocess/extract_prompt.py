@@ -84,7 +84,7 @@ def main():
 
         wav, sr = torchaudio.load(os.path.join(args.audio_dir, fname))
         if sr != args.sr:
-            wav = torchaudio.functional.resample(wav, sr, args.sr)
+            wav = torchaudio.transforms.Resample(sr, args.sr)(wav)
         if wav.shape[0] > 1:
             wav = wav.mean(dim=0, keepdim=True)
 

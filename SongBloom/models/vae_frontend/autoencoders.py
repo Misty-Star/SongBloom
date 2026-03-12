@@ -648,7 +648,7 @@ if __name__ == "__main__":
         
         
         input_audios, sr = torchaudio.load("music_example/加勒比海盗 主题.wav")
-        input_audios = torchaudio.functional.resample(input_audios, sr, 48000)[...,:2048]
+        input_audios = torchaudio.transforms.Resample(sr, 48000)(input_audios)[...,:2048]
         input_audios = input_audios.unsqueeze(1).repeat(1, 2, 1).cuda()
         latents = vae_model.encode_audio(input_audios)
         recover_audio = vae_model.decode_audio(latents)

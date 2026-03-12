@@ -29,6 +29,7 @@ third_party/
 pretrained/
 gpt2/
 wikitext/
+test_train/
 
 # 环境与配置
 .env

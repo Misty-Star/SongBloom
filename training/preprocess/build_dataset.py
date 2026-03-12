@@ -21,6 +21,7 @@ import torchaudio
 
 from .align_lyrics import process_item as process_alignment_item
 from .common import (
+    command_exists,
     ensure_dir,
     get_audio_path,
     get_item_id,
@@ -43,7 +44,7 @@ def convert_audio(
 ) -> tp.Tuple[str, float]:
     wav, sr = torchaudio.load(input_path)
     if sr != sample_rate:
-        wav = torchaudio.functional.resample(wav, sr, sample_rate)
+        wav = torchaudio.transforms.Resample(sr, sample_rate)(wav)
     if mono and wav.shape[0] > 1:
         wav = wav.mean(dim=0, keepdim=True)
     elif not mono and wav.shape[0] == 1:
@@ -64,7 +65,14 @@ def run_demucs(
     if not command:
         raise ValueError("`demucs_cmd` is empty.")
     argv = list(command) + ["-n", model_name, "--two-stems=vocals", "-o", output_dir, audio_path]
-    subprocess.run(argv, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        subprocess.run(argv, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"Demucs command not found: {command[0]!r}. "
+            "Install demucs, set --demucs-cmd to the correct executable, "
+            "or run prepare_assets first so the manifest already contains vocals_path/no_vocals_path."
+        ) from exc
 
     stem = os.path.splitext(os.path.basename(audio_path))[0]
     model_dir = os.path.join(output_dir, model_name, stem)
@@ -161,7 +169,7 @@ def save_prompt_audio(
 ) -> None:
     wav, sr = torchaudio.load(prompt_path or audio_path)
     if sr != sample_rate:
-        wav = torchaudio.functional.resample(wav, sr, sample_rate)
+        wav = torchaudio.transforms.Resample(sr, sample_rate)(wav)
     if wav.shape[0] > 1:
         wav = wav.mean(dim=0, keepdim=True)
     if prompt_start_sec is not None:
@@ -215,7 +223,7 @@ class FeatureExtractorBundle:
     def extract_latent(self, audio_path: str) -> torch.Tensor:
         wav, sr = torchaudio.load(audio_path)
         if sr != self.args.sample_rate:
-            wav = torchaudio.functional.resample(wav, sr, self.args.sample_rate)
+            wav = torchaudio.transforms.Resample(sr, self.args.sample_rate)(wav)
         with torch.no_grad():
             latent = self.vae.encode(wav.unsqueeze(0).to(self.args.device))
         return latent.squeeze(0).cpu()
@@ -225,7 +233,7 @@ class FeatureExtractorBundle:
 
         wav, sr = torchaudio.load(audio_path)
         if sr != self.args.sample_rate:
-            wav = torchaudio.functional.resample(wav, sr, self.args.sample_rate)
+            wav = torchaudio.transforms.Resample(sr, self.args.sample_rate)(wav)
         embeddings = extract_muq_embeddings(self.muq, wav, self.args.sample_rate)
         target_frames = int(wav.shape[-1] / self.args.sample_rate * self.args.target_fps)
         if embeddings.shape[1] != target_frames:
@@ -251,6 +259,54 @@ def resolve_stems(item: dict, audio_path: str, work_dir: str, args) -> tp.Tuple[
         demucs_cmd=args.demucs_cmd,
         model_name=args.demucs_model,
     )
+
+
+def _resolve_command_name(command: str) -> str:
+    argv = shlex.split(command)
+    if not argv:
+        raise ValueError("command must not be empty")
+    return argv[0]
+
+
+def collect_preflight_issues(items: tp.Sequence[dict], args) -> tp.List[str]:
+    issues: tp.List[str] = []
+
+    needs_demucs = not args.skip_demucs and any(
+        not (item.get("vocals_path") and item.get("no_vocals_path")) for item in items
+    )
+    if needs_demucs:
+        demucs_exec = _resolve_command_name(args.demucs_cmd)
+        if not command_exists(demucs_exec):
+            issues.append(
+                f"Demucs executable {demucs_exec!r} is not in PATH. "
+                "Install demucs, pass --demucs-cmd, or run prepare_assets first to enrich the manifest with stems."
+            )
+
+    needs_whisperx = any(not item.get("whisperx_json") for item in items)
+    if needs_whisperx:
+        whisperx_exec = _resolve_command_name(args.whisperx_cmd)
+        if not command_exists(whisperx_exec):
+            issues.append(
+                f"WhisperX executable {whisperx_exec!r} is not in PATH. "
+                "Install whisperx, pass --whisperx-cmd, or run prepare_assets first to enrich the manifest with whisperx_json."
+            )
+
+    needs_songformer = any(not item.get("structure_json") for item in items)
+    if needs_songformer:
+        songformer_exec = _resolve_command_name(args.songformer_python)
+        infer_path = os.path.join(args.songformer_root, "src", "SongFormer", "infer", "infer.py")
+        if not command_exists(songformer_exec):
+            issues.append(
+                f"SongFormer python launcher {songformer_exec!r} is not in PATH. "
+                "Fix --songformer-python before running dataset preprocessing."
+            )
+        if not os.path.exists(infer_path):
+            issues.append(
+                f"SongFormer infer script is missing: {infer_path}. "
+                "Check --songformer-root or initialize the third_party/SongFormer dependency."
+            )
+
+    return issues
 
 
 def write_processed_lyrics(output_path: str, lyrics: str, lyric_processor: str) -> str:
@@ -438,10 +494,20 @@ def main() -> None:
 
     args.output_dir = ensure_dir(args.output_dir)
     args.workspace_dir = ensure_dir(args.workspace_dir or os.path.join(args.output_dir, "_workspace"))
-    features = FeatureExtractorBundle(args)
+    items = load_jsonl(args.input_jsonl)
 
+    preflight_issues = collect_preflight_issues(items, args)
+    if preflight_issues:
+        error_message = "Preflight failed: " + " ".join(preflight_issues)
+        write_jsonl(
+            os.path.join(args.output_dir, "report.jsonl"),
+            [{"id": get_item_id(item), "status": "error", "error": error_message} for item in items],
+        )
+        raise SystemExit(error_message)
+
+    features = FeatureExtractorBundle(args)
     report_rows = []
-    for item in load_jsonl(args.input_jsonl):
+    for item in items:
         sample_id = get_item_id(item)
         try:
             report_rows.append(process_sample(item, args, features))

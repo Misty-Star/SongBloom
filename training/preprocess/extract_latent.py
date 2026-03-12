@@ -43,7 +43,7 @@ def main():
 
         wav, sr = torchaudio.load(os.path.join(args.audio_dir, fname))
         if sr != args.sr:
-            wav = torchaudio.functional.resample(wav, sr, args.sr)
+            wav = torchaudio.transforms.Resample(sr, args.sr)(wav)
 
         with torch.no_grad():
             latent = vae.encode(wav.unsqueeze(0).to(args.device))  # (1, 64, T)
