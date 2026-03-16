@@ -12,6 +12,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import traceback
 import typing as tp
 
@@ -22,11 +23,14 @@ import torchaudio
 from .align_lyrics import process_item as process_alignment_item
 from .common import (
     command_exists,
+    describe_subprocess_failure,
     ensure_dir,
+    format_seconds,
     get_audio_path,
     get_item_id,
     get_raw_lyrics,
     load_jsonl,
+    log_progress,
     merge_adjacent_segments,
     save_json,
     split_sentences,
@@ -60,19 +64,29 @@ def run_demucs(
     output_dir: str,
     demucs_cmd: str,
     model_name: str,
+    timeout_sec: tp.Optional[float] = None,
 ) -> tp.Tuple[str, str]:
     command = shlex.split(demucs_cmd)
     if not command:
         raise ValueError("`demucs_cmd` is empty.")
     argv = list(command) + ["-n", model_name, "--two-stems=vocals", "-o", output_dir, audio_path]
     try:
-        subprocess.run(argv, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(
+            argv,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=None if not timeout_sec or timeout_sec <= 0 else timeout_sec,
+        )
     except FileNotFoundError as exc:
         raise RuntimeError(
             f"Demucs command not found: {command[0]!r}. "
             "Install demucs, set --demucs-cmd to the correct executable, "
             "or run prepare_assets first so the manifest already contains vocals_path/no_vocals_path."
         ) from exc
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"Demucs failed: {describe_subprocess_failure(exc)}") from exc
 
     stem = os.path.splitext(os.path.basename(audio_path))[0]
     model_dir = os.path.join(output_dir, model_name, stem)
@@ -258,7 +272,26 @@ def resolve_stems(item: dict, audio_path: str, work_dir: str, args) -> tp.Tuple[
         output_dir=demucs_dir,
         demucs_cmd=args.demucs_cmd,
         model_name=args.demucs_model,
+        timeout_sec=args.demucs_timeout_sec,
     )
+
+
+class StageError(RuntimeError):
+    def __init__(self, stage: str, message: str):
+        super().__init__(message)
+        self.stage = stage
+
+
+def run_stage(sample_tag: str, stage_name: str, fn):
+    started_at = time.time()
+    log_progress(f"{sample_tag} stage={stage_name} start")
+    try:
+        result = fn()
+    except Exception as exc:
+        raise StageError(stage_name, f"[{stage_name}] {exc}") from exc
+    elapsed = time.time() - started_at
+    log_progress(f"{sample_tag} stage={stage_name} done in {format_seconds(elapsed)}")
+    return result, round(elapsed, 3)
 
 
 def _resolve_command_name(command: str) -> str:
@@ -318,95 +351,137 @@ def write_processed_lyrics(output_path: str, lyrics: str, lyric_processor: str) 
     return processed
 
 
-def process_sample(item: dict, args, features: FeatureExtractorBundle) -> dict:
+def process_sample(item: dict, args, features: FeatureExtractorBundle, sample_index: int, total_items: int) -> dict:
     sample_id = get_item_id(item)
+    sample_tag = f"[{sample_index}/{total_items}] {sample_id}"
     output_sample_dir = os.path.join(args.output_dir, sample_id)
     work_sample_dir = os.path.join(args.workspace_dir, sample_id)
     ensure_dir(output_sample_dir)
     ensure_dir(work_sample_dir)
+    stage_timings: dict[str, float] = {}
 
     if args.skip_existing and os.path.exists(os.path.join(output_sample_dir, "meta.json")):
+        log_progress(f"{sample_tag} skip_existing meta.json already present")
         return {"id": sample_id, "status": "skipped", "output_dir": output_sample_dir}
 
-    standardized_audio, duration = convert_audio(
-        input_path=get_audio_path(item),
-        output_path=os.path.join(work_sample_dir, "full_audio.flac"),
-        sample_rate=args.sample_rate,
-        mono=False,
+    (standardized_audio, duration), stage_timings["audio"] = run_stage(
+        sample_tag,
+        "audio",
+        lambda: convert_audio(
+            input_path=get_audio_path(item),
+            output_path=os.path.join(work_sample_dir, "full_audio.flac"),
+            sample_rate=args.sample_rate,
+            mono=False,
+        ),
     )
     if duration < args.min_duration or duration > args.max_duration:
-        raise ValueError(f"duration {duration:.2f}s outside [{args.min_duration}, {args.max_duration}]")
+        raise StageError("audio", f"duration {duration:.2f}s outside [{args.min_duration}, {args.max_duration}]")
 
-    vocals_path, no_vocals_path = resolve_stems(item, standardized_audio, work_sample_dir, args)
+    (vocals_path, no_vocals_path), stage_timings["stems"] = run_stage(
+        sample_tag,
+        "stems",
+        lambda: resolve_stems(item, standardized_audio, work_sample_dir, args),
+    )
 
     alignment_item = dict(item)
     alignment_item["audio_path"] = standardized_audio
     alignment_item["vocals_path"] = vocals_path
-    alignment = process_alignment_item(
-        item=alignment_item,
-        output_dir=work_sample_dir,
-        whisperx_cmd=args.whisperx_cmd,
-        language=args.language,
-        model=args.whisperx_model,
-        device=args.whisperx_device,
-        compute_type=args.whisperx_compute_type,
-        similarity_threshold=args.lyrics_similarity_threshold,
-        skip_existing=args.skip_existing,
+    alignment, stage_timings["alignment"] = run_stage(
+        sample_tag,
+        "alignment",
+        lambda: process_alignment_item(
+            item=alignment_item,
+            output_dir=work_sample_dir,
+            whisperx_cmd=args.whisperx_cmd,
+            language=args.language,
+            model=args.whisperx_model,
+            device=args.whisperx_device,
+            compute_type=args.whisperx_compute_type,
+            similarity_threshold=args.lyrics_similarity_threshold,
+            skip_existing=args.skip_existing,
+            timeout_sec=args.whisperx_timeout_sec,
+        ),
     )
     if alignment["whisperx_quality"]["score"] < args.min_whisperx_score:
-        raise ValueError(f"low whisperx score: {alignment['whisperx_quality']['score']:.3f}")
+        raise StageError("alignment", f"low whisperx score: {alignment['whisperx_quality']['score']:.3f}")
 
     structure_item = dict(item)
     structure_item["audio_path"] = standardized_audio
     structure_item["songformer_audio_path"] = standardized_audio
     structure_item["lyrics_alignment_json"] = os.path.join(work_sample_dir, sample_id, "lyrics_alignment.json")
     structure_item["duration_hint"] = duration
-    structure_payload = process_structure_item(
-        item=structure_item,
-        output_dir=work_sample_dir,
-        ignore_silence=True,
-        min_duration=args.min_structure_duration,
-        refine_vocals=not args.disable_vocal_refine,
-        vocal_threshold=args.vocal_threshold,
-        non_vocal_threshold=args.non_vocal_threshold,
-        songformer_root=args.songformer_root,
-        python_exec=args.songformer_python,
-        gpu_num=args.songformer_gpu_num,
-        num_thread_per_gpu=args.songformer_threads,
-        model=args.songformer_model,
-        checkpoint=args.songformer_checkpoint,
-        config_path=args.songformer_config,
-        no_rule_post_processing=args.songformer_no_rule_post,
-        skip_existing=args.skip_existing,
+    structure_payload, stage_timings["structure"] = run_stage(
+        sample_tag,
+        "structure",
+        lambda: process_structure_item(
+            item=structure_item,
+            output_dir=work_sample_dir,
+            ignore_silence=True,
+            min_duration=args.min_structure_duration,
+            refine_vocals=not args.disable_vocal_refine,
+            vocal_threshold=args.vocal_threshold,
+            non_vocal_threshold=args.non_vocal_threshold,
+            songformer_root=args.songformer_root,
+            python_exec=args.songformer_python,
+            gpu_num=args.songformer_gpu_num,
+            num_thread_per_gpu=args.songformer_threads,
+            model=args.songformer_model,
+            checkpoint=args.songformer_checkpoint,
+            config_path=args.songformer_config,
+            no_rule_post_processing=args.songformer_no_rule_post,
+            skip_existing=args.skip_existing,
+            timeout_sec=args.songformer_timeout_sec,
+        ),
     )
     if len(structure_payload["segments"]) < args.min_structure_segments:
-        raise ValueError(f"too few structure segments: {len(structure_payload['segments'])}")
+        raise StageError("structure", f"too few structure segments: {len(structure_payload['segments'])}")
 
-    structured_lyrics, structure_duration = build_lyrics_and_structure(
-        cleaned_lyrics=alignment["cleaned_lyrics"] or get_raw_lyrics(item),
-        structure_payload=structure_payload,
+    (structured_lyrics, structure_duration), stage_timings["lyrics_structure"] = run_stage(
+        sample_tag,
+        "lyrics_structure",
+        lambda: build_lyrics_and_structure(
+            cleaned_lyrics=alignment["cleaned_lyrics"] or get_raw_lyrics(item),
+            structure_payload=structure_payload,
+        ),
     )
     if not structured_lyrics.strip():
-        raise ValueError("structured lyrics is empty")
+        raise StageError("lyrics_structure", "structured lyrics is empty")
 
     lyrics_out_path = os.path.join(output_sample_dir, "lyrics.txt")
-    processed_lyrics = write_processed_lyrics(lyrics_out_path, structured_lyrics, args.lyric_processor)
+    processed_lyrics, stage_timings["lyrics_write"] = run_stage(
+        sample_tag,
+        "lyrics_write",
+        lambda: write_processed_lyrics(lyrics_out_path, structured_lyrics, args.lyric_processor),
+    )
     if not processed_lyrics.strip():
-        raise ValueError("processed lyrics is empty")
+        raise StageError("lyrics_write", "processed lyrics is empty")
 
     prompt_out = os.path.join(output_sample_dir, "prompt_wav.flac")
-    save_prompt_audio(
-        audio_path=standardized_audio,
-        output_path=prompt_out,
-        sample_rate=args.sample_rate,
-        prompt_len=args.prompt_len,
-        structure_segments=structure_payload["segments"],
-        prompt_path=item.get("prompt_path"),
-        prompt_start_sec=item.get("prompt_start_sec"),
+    _, stage_timings["prompt"] = run_stage(
+        sample_tag,
+        "prompt",
+        lambda: save_prompt_audio(
+            audio_path=standardized_audio,
+            output_path=prompt_out,
+            sample_rate=args.sample_rate,
+            prompt_len=args.prompt_len,
+            structure_segments=structure_payload["segments"],
+            prompt_path=item.get("prompt_path"),
+            prompt_start_sec=item.get("prompt_start_sec"),
+        ),
     )
 
-    x_latent = features.extract_latent(standardized_audio)
-    x_sketch = features.extract_sketch(standardized_audio)
+    x_latent, stage_timings["latent"] = run_stage(
+        sample_tag,
+        "latent",
+        lambda: features.extract_latent(standardized_audio),
+    )
+    x_sketch, stage_timings["sketch"] = run_stage(
+        sample_tag,
+        "sketch",
+        lambda: features.extract_sketch(standardized_audio),
+    )
+
     effective_frames = min(
         x_latent.shape[-1],
         x_sketch.shape[0],
@@ -414,12 +489,16 @@ def process_sample(item: dict, args, features: FeatureExtractorBundle) -> dict:
     )
     effective_frames = (effective_frames // args.block_size) * args.block_size
     if effective_frames <= 0:
-        raise ValueError("effective frame length is zero")
+        raise StageError("features", "effective frame length is zero")
 
-    x_latent = x_latent[:, :effective_frames]
-    x_sketch = x_sketch[:effective_frames]
-    torch.save(x_latent, os.path.join(output_sample_dir, "x_latent.pt"))
-    torch.save(x_sketch, os.path.join(output_sample_dir, "x_sketch.pt"))
+    _, stage_timings["feature_write"] = run_stage(
+        sample_tag,
+        "feature_write",
+        lambda: (
+            torch.save(x_latent[:, :effective_frames], os.path.join(output_sample_dir, "x_latent.pt")),
+            torch.save(x_sketch[:effective_frames], os.path.join(output_sample_dir, "x_sketch.pt")),
+        ),
+    )
 
     meta = {
         "duration": round(effective_frames / args.target_fps, 3),
@@ -429,8 +508,13 @@ def process_sample(item: dict, args, features: FeatureExtractorBundle) -> dict:
         "no_vocals_path": no_vocals_path,
         "whisperx_quality": alignment["whisperx_quality"],
         "songformer_segments": structure_payload["segments"],
+        "stage_timings": stage_timings,
     }
-    save_json(os.path.join(output_sample_dir, "meta.json"), meta)
+    _, stage_timings["meta"] = run_stage(
+        sample_tag,
+        "meta",
+        lambda: save_json(os.path.join(output_sample_dir, "meta.json"), meta),
+    )
 
     if not args.keep_intermediate:
         shutil.rmtree(work_sample_dir, ignore_errors=True)
@@ -441,6 +525,7 @@ def process_sample(item: dict, args, features: FeatureExtractorBundle) -> dict:
         "output_dir": output_sample_dir,
         "duration": meta["duration"],
         "num_structure_segments": len(structure_payload["segments"]),
+        "stage_timings": stage_timings,
     }
 
 
@@ -465,12 +550,14 @@ def main() -> None:
     parser.add_argument("--skip-demucs", action="store_true")
     parser.add_argument("--demucs-cmd", type=str, default="demucs")
     parser.add_argument("--demucs-model", type=str, default="htdemucs")
+    parser.add_argument("--demucs-timeout-sec", type=float, default=0.0)
 
     parser.add_argument("--whisperx-cmd", type=str, default="whisperx")
     parser.add_argument("--whisperx-model", type=str, default="large-v3")
     parser.add_argument("--whisperx-device", type=str, default="cuda")
     parser.add_argument("--whisperx-compute-type", type=str, default="float16")
     parser.add_argument("--language", type=str, default=None)
+    parser.add_argument("--whisperx-timeout-sec", type=float, default=0.0)
 
     parser.add_argument("--songformer-root", type=str, default="third_party/SongFormer")
     parser.add_argument("--songformer-python", type=str, default=sys.executable)
@@ -480,6 +567,7 @@ def main() -> None:
     parser.add_argument("--songformer-checkpoint", type=str, default="SongFormer.safetensors")
     parser.add_argument("--songformer-config", type=str, default="SongFormer.yaml")
     parser.add_argument("--songformer-no-rule-post", action="store_true")
+    parser.add_argument("--songformer-timeout-sec", type=float, default=0.0)
     parser.add_argument("--min-structure-duration", type=float, default=1.0)
     parser.add_argument("--min-structure-segments", type=int, default=2)
     parser.add_argument("--disable-vocal-refine", action="store_true")
@@ -507,24 +595,43 @@ def main() -> None:
 
     features = FeatureExtractorBundle(args)
     report_rows = []
-    for item in items:
+    report_path = os.path.join(args.output_dir, "report.jsonl")
+    total_items = len(items)
+    build_started_at = time.time()
+    for index, item in enumerate(items, start=1):
         sample_id = get_item_id(item)
+        sample_tag = f"[{index}/{total_items}] {sample_id}"
+        sample_started_at = time.time()
+        log_progress(f"{sample_tag} sample start")
         try:
-            report_rows.append(process_sample(item, args, features))
+            row = process_sample(item, args, features, sample_index=index, total_items=total_items)
+            report_rows.append(row)
+            log_progress(f"{sample_tag} sample done in {format_seconds(time.time() - sample_started_at)}")
         except Exception as exc:
             shutil.rmtree(os.path.join(args.output_dir, sample_id), ignore_errors=True)
             if not args.keep_intermediate:
                 shutil.rmtree(os.path.join(args.workspace_dir, sample_id), ignore_errors=True)
-            report_rows.append(
-                {
-                    "id": sample_id,
-                    "status": "error",
-                    "error": str(exc),
-                    "traceback": traceback.format_exc(limit=3),
-                }
+            error_row = {
+                "id": sample_id,
+                "status": "error",
+                "error": str(exc),
+                "traceback": traceback.format_exc(limit=3),
+            }
+            if isinstance(exc, StageError):
+                error_row["stage"] = exc.stage
+            report_rows.append(error_row)
+            log_progress(
+                f"{sample_tag} sample error after {format_seconds(time.time() - sample_started_at)}: {error_row['error']}"
             )
+        write_jsonl(report_path, report_rows)
+        ok_count = sum(1 for row in report_rows if row.get("status") == "ok")
+        err_count = sum(1 for row in report_rows if row.get("status") == "error")
+        skipped_count = sum(1 for row in report_rows if row.get("status") == "skipped")
+        log_progress(
+            f"{sample_tag} progress ok={ok_count} error={err_count} skipped={skipped_count} total={len(report_rows)}/{total_items}"
+        )
 
-    write_jsonl(os.path.join(args.output_dir, "report.jsonl"), report_rows)
+    log_progress(f"[build_dataset] finished in {format_seconds(time.time() - build_started_at)}")
 
 
 if __name__ == "__main__":

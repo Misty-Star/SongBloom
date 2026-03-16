@@ -15,13 +15,17 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import typing as tp
 
 from .common import (
     clip_segments,
+    describe_subprocess_failure,
     ensure_dir,
+    format_seconds,
     get_audio_path,
     get_item_id,
+    log_progress,
     load_json,
     load_jsonl,
     make_temp_scp,
@@ -147,6 +151,7 @@ def run_songformer(
     checkpoint: str,
     config_path: str,
     no_rule_post_processing: bool,
+    timeout_sec: tp.Optional[float] = None,
 ) -> str:
     infer_dir = os.path.join(songformer_root, "src", "SongFormer")
     if not os.path.exists(os.path.join(infer_dir, "infer", "infer.py")):
@@ -157,6 +162,18 @@ def run_songformer(
         python_cmd = shlex.split(python_exec)
         if not python_cmd:
             raise ValueError("`python_exec` is empty.")
+        env = os.environ.copy()
+        infer_dir_abs = os.path.abspath(infer_dir)
+        third_party_dir = os.path.abspath(os.path.normpath(os.path.join(infer_dir, "..", "third_party")))
+        pythonpath_entries = [infer_dir_abs, third_party_dir]
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        if existing_pythonpath:
+            pythonpath_entries.append(existing_pythonpath)
+        env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
+        env.setdefault("OMP_NUM_THREADS", "1")
+        env.setdefault("MPI_NUM_THREADS", "1")
+        env.setdefault("NCCL_P2P_DISABLE", "1")
+        env.setdefault("NCCL_IB_DISABLE", "1")
         argv = python_cmd + [
             os.path.join("infer", "infer.py"),
             "-i",
@@ -176,14 +193,27 @@ def run_songformer(
         ]
         if no_rule_post_processing:
             argv.append("--no_rule_post_processing")
-        subprocess.run(
-            argv,
-            cwd=infer_dir,
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        started_at = time.time()
+        log_progress(f"[songformer] start {os.path.basename(audio_path)}")
+        try:
+            subprocess.run(
+                argv,
+                cwd=infer_dir,
+                env=env,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=None if not timeout_sec or timeout_sec <= 0 else timeout_sec,
+            )
+            log_progress(
+                f"[songformer] done {os.path.basename(audio_path)} in {format_seconds(time.time() - started_at)}"
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            details = describe_subprocess_failure(exc)
+            if details:
+                raise RuntimeError(f"SongFormer inference failed: {details}") from exc
+            raise
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -210,6 +240,7 @@ def process_item(
     config_path: str = "SongFormer.yaml",
     no_rule_post_processing: bool = False,
     skip_existing: bool = False,
+    timeout_sec: tp.Optional[float] = None,
 ) -> dict:
     sample_id = get_item_id(item)
     sample_dir = ensure_dir(os.path.join(output_dir, sample_id))
@@ -232,6 +263,7 @@ def process_item(
             checkpoint=checkpoint,
             config_path=config_path,
             no_rule_post_processing=no_rule_post_processing,
+            timeout_sec=timeout_sec,
         )
 
     segments = parse_songformer_segments(load_json(songformer_json), ignore_silence=ignore_silence)
@@ -281,6 +313,7 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=str, default="SongFormer.safetensors")
     parser.add_argument("--config-path", type=str, default="SongFormer.yaml")
     parser.add_argument("--no-rule-post-processing", action="store_true")
+    parser.add_argument("--timeout-sec", type=float, default=0.0)
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--summary-jsonl", type=str, default="")
     args = parser.parse_args()
@@ -305,6 +338,7 @@ def main() -> None:
                 checkpoint=args.checkpoint,
                 config_path=args.config_path,
                 no_rule_post_processing=args.no_rule_post_processing,
+                timeout_sec=args.timeout_sec,
                 skip_existing=args.skip_existing,
             )
             rows.append(

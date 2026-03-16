@@ -25,6 +25,8 @@ def main() -> None:
     parser.add_argument("--separator-model-flag", type=str, default="auto", choices=["auto", "model_filename", "model_name"])
     parser.add_argument("--separator-output-format", type=str, default="FLAC")
     parser.add_argument("--separator-model-file-dir", type=str, default="")
+    parser.add_argument("--separator-numba-cache-dir", type=str, default="")
+    parser.add_argument("--separator-timeout-sec", type=float, default=0.0)
 
     parser.add_argument("--skip-whisperx", action="store_true")
     parser.add_argument("--whisperx-cmd", type=str, default="conda run -n whisperx whisperx")
@@ -32,6 +34,7 @@ def main() -> None:
     parser.add_argument("--whisperx-device", type=str, default="cuda")
     parser.add_argument("--whisperx-compute-type", type=str, default="float16")
     parser.add_argument("--language", type=str, default=None)
+    parser.add_argument("--whisperx-timeout-sec", type=float, default=0.0)
     parser.add_argument("--songformer-python", type=str, default="")
     args, build_dataset_extra_args = parser.parse_known_args()
 
@@ -53,6 +56,8 @@ def main() -> None:
         args.separator_model_flag,
         "--separator-output-format",
         args.separator_output_format,
+        "--separator-timeout-sec",
+        str(args.separator_timeout_sec),
         "--whisperx-cmd",
         args.whisperx_cmd,
         "--whisperx-model",
@@ -61,9 +66,13 @@ def main() -> None:
         args.whisperx_device,
         "--whisperx-compute-type",
         args.whisperx_compute_type,
+        "--whisperx-timeout-sec",
+        str(args.whisperx_timeout_sec),
     ]
     if args.separator_model_file_dir:
         prepare_cmd += ["--separator-model-file-dir", args.separator_model_file_dir]
+    if args.separator_numba_cache_dir:
+        prepare_cmd += ["--separator-numba-cache-dir", args.separator_numba_cache_dir]
     if args.language:
         prepare_cmd += ["--language", args.language]
     if args.workspace_dir:

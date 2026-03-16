@@ -15,6 +15,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import time
 import traceback
 import typing as tp
 
@@ -26,9 +27,11 @@ from .common import (
     command_exists,
     ensure_dir,
     find_file_with_stem,
+    format_seconds,
     get_audio_path,
     get_item_id,
     load_jsonl,
+    log_progress,
     normalize_whitespace,
     write_jsonl,
 )
@@ -92,6 +95,10 @@ def get_separator_model_dir(args) -> str:
     return os.path.abspath(args.separator_model_file_dir or default_separator_model_dir())
 
 
+def get_separator_numba_cache_dir(args) -> str:
+    return os.path.abspath(args.separator_numba_cache_dir or os.path.join(args.assets_dir, "_numba_cache"))
+
+
 def companion_separator_assets(model_filename: str) -> tp.List[str]:
     base, ext = os.path.splitext(model_filename)
     if ext.lower() == ".ckpt":
@@ -108,6 +115,12 @@ def host_resolves(hostname: str) -> bool:
 
 
 def describe_exception(exc: Exception) -> str:
+    if isinstance(exc, subprocess.TimeoutExpired):
+        stderr = normalize_whitespace((exc.stderr or "") if isinstance(exc.stderr, str) else "")
+        stdout = normalize_whitespace((exc.stdout or "") if isinstance(exc.stdout, str) else "")
+        detail = stderr or stdout
+        message = f"timed out after {exc.timeout}s"
+        return f"{message}. {detail}" if detail else message
     if isinstance(exc, subprocess.CalledProcessError):
         stderr = normalize_whitespace(exc.stderr or "")
         stdout = normalize_whitespace(exc.stdout or "")
@@ -169,12 +182,18 @@ def run_audio_separator(audio_path: str, output_dir: str, args) -> tp.Tuple[str,
     if args.separator_model_file_dir:
         argv += ["--model_file_dir", args.separator_model_file_dir]
 
+    env = os.environ.copy()
+    env.setdefault("NUMBA_CACHE_DIR", get_separator_numba_cache_dir(args))
+    ensure_dir(env["NUMBA_CACHE_DIR"])
+
     subprocess.run(
         argv,
         check=True,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=env,
+        timeout=None if not args.separator_timeout_sec or args.separator_timeout_sec <= 0 else args.separator_timeout_sec,
     )
     return find_separator_outputs(output_dir, args.separator_output_format)
 
@@ -344,6 +363,7 @@ def prepare_item(item: dict, args) -> tp.Tuple[dict, dict]:
                     model=args.whisperx_model,
                     device=args.whisperx_device,
                     compute_type=args.whisperx_compute_type,
+                    timeout_sec=args.whisperx_timeout_sec,
                 )
                 whisperx_status = "ok"
             record["whisperx_json"] = os.path.abspath(whisperx_json)
@@ -405,6 +425,8 @@ def main() -> None:
     parser.add_argument("--separator-model-flag", type=str, default="auto", choices=["auto", "model_filename", "model_name"])
     parser.add_argument("--separator-output-format", type=str, default="FLAC")
     parser.add_argument("--separator-model-file-dir", type=str, default="")
+    parser.add_argument("--separator-numba-cache-dir", type=str, default="")
+    parser.add_argument("--separator-timeout-sec", type=float, default=0.0)
 
     parser.add_argument("--skip-whisperx", action="store_true")
     parser.add_argument("--whisperx-cmd", type=str, default="conda run -n whisperx whisperx")
@@ -412,6 +434,7 @@ def main() -> None:
     parser.add_argument("--whisperx-device", type=str, default="cuda")
     parser.add_argument("--whisperx-compute-type", type=str, default="float16")
     parser.add_argument("--language", type=str, default=None)
+    parser.add_argument("--whisperx-timeout-sec", type=float, default=0.0)
     args = parser.parse_args()
 
     args.assets_dir = ensure_dir(args.assets_dir)
@@ -430,13 +453,20 @@ def main() -> None:
 
     output_rows = []
     report_rows = []
-    for item in items:
+    total_items = len(items)
+    for index, item in enumerate(items, start=1):
+        sample_id = get_item_id(item)
+        sample_tag = f"[{index}/{total_items}] {sample_id}"
+        sample_started_at = time.time()
+        log_progress(f"{sample_tag} prepare_assets start")
         record, report = prepare_item(item, args)
         output_rows.append(record)
         report_rows.append(report)
-
-    write_jsonl(args.output_manifest, output_rows)
-    write_jsonl(args.report_path, report_rows)
+        write_jsonl(args.output_manifest, output_rows)
+        write_jsonl(args.report_path, report_rows)
+        log_progress(
+            f"{sample_tag} prepare_assets {report['status']} in {format_seconds(time.time() - sample_started_at)}"
+        )
 
 
 if __name__ == "__main__":

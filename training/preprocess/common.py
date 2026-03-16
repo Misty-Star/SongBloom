@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import re
@@ -69,8 +70,40 @@ def run_command(
     )
 
 
+def log_progress(message: str) -> None:
+    timestamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}", flush=True)
+
+
 def normalize_whitespace(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
+
+
+def format_seconds(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, rem = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{int(minutes)}m{rem:04.1f}s"
+    hours, rem = divmod(minutes, 60)
+    return f"{int(hours)}h{int(rem):02d}m"
+
+
+def describe_subprocess_failure(exc: BaseException) -> str:
+    if isinstance(exc, subprocess.TimeoutExpired):
+        stdout = normalize_whitespace((exc.stdout or "") if isinstance(exc.stdout, str) else "")
+        stderr = normalize_whitespace((exc.stderr or "") if isinstance(exc.stderr, str) else "")
+        detail = stderr or stdout
+        message = f"timed out after {exc.timeout}s"
+        return f"{message}. {detail}" if detail else message
+    if isinstance(exc, subprocess.CalledProcessError):
+        stdout = normalize_whitespace(exc.stdout or "")
+        stderr = normalize_whitespace(exc.stderr or "")
+        detail = stderr or stdout
+        if detail:
+            return detail
+        return str(exc)
+    return str(exc)
 
 
 def strip_structure_tags(text: str) -> str:
@@ -185,4 +218,3 @@ def make_temp_scp(audio_path: str) -> tp.Tuple[str, str]:
     with open(scp_path, "w", encoding="utf-8") as handle:
         handle.write(audio_path + "\n")
     return tmp_dir, scp_path
-

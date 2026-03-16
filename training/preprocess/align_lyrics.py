@@ -19,6 +19,7 @@ from difflib import SequenceMatcher
 from normalize_lyrics import clean_lyrics
 
 from .common import (
+    describe_subprocess_failure,
     ensure_dir,
     get_audio_path,
     get_item_id,
@@ -75,6 +76,7 @@ def run_whisperx_cli(
     model: str,
     device: str,
     compute_type: str,
+    timeout_sec: tp.Optional[float] = None,
 ) -> str:
     executable = shlex.split(whisperx_cmd)
     if not executable:
@@ -94,13 +96,17 @@ def run_whisperx_cli(
     ]
     if language:
         argv += ["--language", language]
-    completed = __import__("subprocess").run(
-        argv,
-        check=True,
-        text=True,
-        stdout=__import__("subprocess").PIPE,
-        stderr=__import__("subprocess").PIPE,
-    )
+    try:
+        completed = __import__("subprocess").run(
+            argv,
+            check=True,
+            text=True,
+            stdout=__import__("subprocess").PIPE,
+            stderr=__import__("subprocess").PIPE,
+            timeout=None if not timeout_sec or timeout_sec <= 0 else timeout_sec,
+        )
+    except (__import__("subprocess").CalledProcessError, __import__("subprocess").TimeoutExpired) as exc:
+        raise RuntimeError(f"WhisperX failed: {describe_subprocess_failure(exc)}") from exc
     if completed.stderr:
         print(completed.stderr.strip())
     output_name = os.path.splitext(os.path.basename(audio_path))[0] + ".json"
@@ -165,6 +171,7 @@ def process_item(
     compute_type: str,
     similarity_threshold: float,
     skip_existing: bool,
+    timeout_sec: tp.Optional[float] = None,
 ) -> dict:
     sample_id = get_item_id(item)
     sample_dir = ensure_dir(os.path.join(output_dir, sample_id))
@@ -187,6 +194,7 @@ def process_item(
                 model=model,
                 device=device,
                 compute_type=compute_type,
+                timeout_sec=timeout_sec,
             )
         )
 
@@ -205,6 +213,7 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--compute-type", type=str, default="float16")
     parser.add_argument("--similarity-threshold", type=float, default=0.25)
+    parser.add_argument("--timeout-sec", type=float, default=0.0)
     parser.add_argument("--skip-existing", action="store_true")
     args = parser.parse_args()
 
@@ -223,6 +232,7 @@ def main() -> None:
                 compute_type=args.compute_type,
                 similarity_threshold=args.similarity_threshold,
                 skip_existing=args.skip_existing,
+                timeout_sec=args.timeout_sec,
             )
             summary.append(
                 {
