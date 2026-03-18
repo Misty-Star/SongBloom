@@ -21,6 +21,7 @@ from SongBloom.models.musicgen.conditioners import (
     ConditioningAttributes,
     WavCondition,
 )
+from training.dataset_utils import compute_effective_frame_length
 
 
 class SongBloomDataset(Dataset):
@@ -37,7 +38,7 @@ class SongBloomDataset(Dataset):
         self.data_dir = data_dir
         self.sample_rate = sample_rate
         self.block_size = block_size
-        self.max_frames = int(max_duration * 25)
+        self.max_duration = max_duration
         self.prompt_samples = int(prompt_len * sample_rate)
 
         # 收集所有包含 meta.json 的子目录
@@ -61,11 +62,13 @@ class SongBloomDataset(Dataset):
             meta = json.load(f)
 
         # 计算有效帧数（对齐到 block_size）
-        T = min(x_sketch.shape[0], x_latent.shape[-1])
-        if "duration" in meta:
-            T = min(T, int(meta["duration"] * 25))
-        x_len = (T // self.block_size) * self.block_size
-        x_len = min(x_len, self.max_frames)
+        x_len = compute_effective_frame_length(
+            sketch_frames=x_sketch.shape[0],
+            latent_frames=x_latent.shape[-1],
+            duration_seconds=meta.get("duration"),
+            block_size=self.block_size,
+            max_duration=self.max_duration,
+        )
 
         # 截断到有效长度
         x_sketch = x_sketch[:x_len]

@@ -19,6 +19,8 @@ build/
 # 训练日志
 wandb/
 runs/
+training/runs/
+lightning_logs/
 logs/
 tensorboard/
 

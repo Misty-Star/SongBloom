@@ -30,6 +30,7 @@ from .common import (
     load_jsonl,
     make_temp_scp,
     merge_adjacent_segments,
+    normalize_whitespace,
     save_json,
     vocal_ratio_for_segment,
     write_jsonl,
@@ -88,6 +89,46 @@ def load_vocal_intervals(path: tp.Optional[str]) -> tp.List[tp.Tuple[float, floa
     return intervals
 
 
+def build_segments_from_vocal_intervals(
+    vocal_intervals: tp.Sequence[tp.Tuple[float, float]],
+    duration_hint: tp.Optional[float] = None,
+    merge_gap: float = 0.5,
+) -> tp.List[dict]:
+    normalized: tp.List[tp.Tuple[float, float]] = []
+    for start, end in sorted(vocal_intervals):
+        start = max(0.0, float(start))
+        end = max(start, float(end))
+        if end <= start:
+            continue
+        if normalized and start <= normalized[-1][1] + merge_gap:
+            normalized[-1] = (normalized[-1][0], max(normalized[-1][1], end))
+        else:
+            normalized.append((start, end))
+
+    total_end = float(duration_hint) if duration_hint is not None else 0.0
+    if normalized:
+        total_end = max(total_end, normalized[-1][1])
+    if total_end <= 0:
+        return []
+
+    segments: tp.List[dict] = []
+    cursor = 0.0
+    for start, end in normalized:
+        if start > cursor + 1e-4:
+            gap_label = "[intro]" if not segments else "[inst]"
+            segments.append({"label": gap_label, "start": cursor, "end": start})
+        segments.append({"label": "[verse]", "start": start, "end": end})
+        cursor = end
+
+    if total_end > cursor + 1e-4:
+        tail_label = "[outro]" if segments else "[inst]"
+        segments.append({"label": tail_label, "start": cursor, "end": total_end})
+
+    if not segments:
+        segments.append({"label": "[inst]", "start": 0.0, "end": total_end})
+    return merge_adjacent_segments(segments)
+
+
 def refine_with_vocal_activity(
     segments: tp.Sequence[dict],
     vocal_intervals: tp.Sequence[tp.Tuple[float, float]],
@@ -138,6 +179,51 @@ def absorb_tiny_segments(segments: tp.Sequence[dict], min_duration: float) -> tp
             segments[index + 1]["start"] = segments[index]["start"]
         del segments[index]
     return segments
+
+
+def _list_songformer_json_candidates(output_dir: str) -> tp.List[str]:
+    if not os.path.isdir(output_dir):
+        return []
+    candidates = []
+    for name in os.listdir(output_dir):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(output_dir, name)
+        if os.path.isfile(path):
+            candidates.append(path)
+    return sorted(candidates, key=os.path.getmtime, reverse=True)
+
+
+def _resolve_songformer_result(
+    output_dir: str,
+    expected_path: str,
+    command_started_at: float,
+    wait_sec: float = 2.0,
+) -> tp.Tuple[tp.Optional[str], tp.List[str]]:
+    deadline = time.time() + max(wait_sec, 0.0)
+    candidates: tp.List[str] = []
+    while True:
+        if os.path.exists(expected_path):
+            candidates = _list_songformer_json_candidates(output_dir)
+            return expected_path, candidates
+
+        candidates = _list_songformer_json_candidates(output_dir)
+        fresh_candidates = [path for path in candidates if os.path.getmtime(path) >= command_started_at - 1.0]
+        if len(fresh_candidates) == 1:
+            return fresh_candidates[0], candidates
+        if len(candidates) == 1:
+            return candidates[0], candidates
+
+        if time.time() >= deadline:
+            return None, candidates
+        time.sleep(0.2)
+
+
+def _truncate_subprocess_log(text: str, max_len: int = 600) -> str:
+    normalized = normalize_whitespace(text)
+    if len(normalized) <= max_len:
+        return normalized
+    return normalized[: max_len - 3] + "..."
 
 
 def run_songformer(
@@ -195,8 +281,9 @@ def run_songformer(
             argv.append("--no_rule_post_processing")
         started_at = time.time()
         log_progress(f"[songformer] start {os.path.basename(audio_path)}")
+        completed: tp.Optional[subprocess.CompletedProcess[str]] = None
         try:
-            subprocess.run(
+            completed = subprocess.run(
                 argv,
                 cwd=infer_dir,
                 env=env,
@@ -218,9 +305,32 @@ def run_songformer(
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     result_path = os.path.join(output_dir, f"{os.path.splitext(os.path.basename(audio_path))[0]}.json")
-    if not os.path.exists(result_path):
-        raise FileNotFoundError(f"SongFormer output not found: {result_path}")
-    return result_path
+    resolved_path, candidates = _resolve_songformer_result(
+        output_dir=output_dir,
+        expected_path=result_path,
+        command_started_at=started_at,
+    )
+    if resolved_path:
+        if resolved_path != result_path:
+            log_progress(
+                f"[songformer] expected {os.path.basename(result_path)} missing; "
+                f"fallback to {os.path.basename(resolved_path)}"
+            )
+        return resolved_path
+
+    error_parts = [f"SongFormer output not found: {result_path}"]
+    if candidates:
+        error_parts.append(
+            "json_candidates=" + ", ".join(os.path.basename(path) for path in candidates[:5])
+        )
+    if completed is not None:
+        stderr_text = _truncate_subprocess_log(completed.stderr or "")
+        stdout_text = _truncate_subprocess_log(completed.stdout or "")
+        if stderr_text:
+            error_parts.append(f"stderr={stderr_text}")
+        elif stdout_text:
+            error_parts.append(f"stdout={stdout_text}")
+    raise FileNotFoundError(". ".join(error_parts))
 
 
 def process_item(
@@ -248,27 +358,44 @@ def process_item(
     if skip_existing and os.path.exists(output_path):
         return load_json(output_path)
 
+    vocal_intervals = load_vocal_intervals(item.get("lyrics_alignment_json"))
+    songformer_error: tp.Optional[str] = None
     if item.get("structure_json"):
         songformer_json = str(item["structure_json"])
+        segments = parse_songformer_segments(load_json(songformer_json), ignore_silence=ignore_silence)
     else:
         songformer_out_dir = ensure_dir(os.path.join(sample_dir, "songformer"))
-        songformer_json = run_songformer(
-            audio_path=item.get("songformer_audio_path") or get_audio_path(item),
-            output_dir=songformer_out_dir,
-            songformer_root=songformer_root,
-            python_exec=python_exec,
-            gpu_num=gpu_num,
-            num_thread_per_gpu=num_thread_per_gpu,
-            model=model,
-            checkpoint=checkpoint,
-            config_path=config_path,
-            no_rule_post_processing=no_rule_post_processing,
-            timeout_sec=timeout_sec,
-        )
+        try:
+            songformer_json = run_songformer(
+                audio_path=item.get("songformer_audio_path") or get_audio_path(item),
+                output_dir=songformer_out_dir,
+                songformer_root=songformer_root,
+                python_exec=python_exec,
+                gpu_num=gpu_num,
+                num_thread_per_gpu=num_thread_per_gpu,
+                model=model,
+                checkpoint=checkpoint,
+                config_path=config_path,
+                no_rule_post_processing=no_rule_post_processing,
+                timeout_sec=timeout_sec,
+            )
+            segments = parse_songformer_segments(load_json(songformer_json), ignore_silence=ignore_silence)
+        except FileNotFoundError as exc:
+            songformer_json = ""
+            songformer_error = str(exc)
+            segments = build_segments_from_vocal_intervals(
+                vocal_intervals=vocal_intervals,
+                duration_hint=item.get("duration_hint"),
+            )
+            if segments:
+                log_progress(
+                    f"[songformer] fallback to vocal-activity structure for {sample_id}: "
+                    f"{len(segments)} segments"
+                )
+            else:
+                raise
 
-    segments = parse_songformer_segments(load_json(songformer_json), ignore_silence=ignore_silence)
     if refine_vocals:
-        vocal_intervals = load_vocal_intervals(item.get("lyrics_alignment_json"))
         if vocal_intervals:
             segments = refine_with_vocal_activity(
                 segments=segments,
@@ -289,9 +416,11 @@ def process_item(
     payload = {
         "id": sample_id,
         "segments": segments,
-        "source": "songformer",
+        "source": "songformer" if songformer_json else "vocal_activity_fallback",
         "songformer_json": songformer_json,
     }
+    if songformer_error:
+        payload["songformer_error"] = songformer_error
     save_json(output_path, payload)
     return payload
 

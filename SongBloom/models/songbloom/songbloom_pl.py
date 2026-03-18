@@ -15,6 +15,8 @@ import lightning as pl
 
 import os, sys
 
+from training.dropout_utils import apply_condition_dropouts
+
 from ..musicgen.conditioners import WavCondition, JointEmbedCondition, ConditioningAttributes
 from ..vae_frontend import StableVAE
 from .songbloom_mvsa import MVSA_DiTAR
@@ -69,8 +71,11 @@ class SongBloom_PL(pl.LightningModule):
         x_sketch, x_latent, x_len, attributes = batch
 
         # CFG dropout on conditions
-        attributes = [self.model.cfg_dropout(attr) for attr in attributes]
-        attributes = [self.model.att_dropout(attr) for attr in attributes]
+        attributes = apply_condition_dropouts(
+            self.model.cfg_dropout,
+            self.model.att_dropout,
+            attributes,
+        )
 
         # Condition encoding: tokenize → forward
         tokenized = self.model.condition_provider.tokenize(attributes)

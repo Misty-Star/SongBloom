@@ -1,4 +1,5 @@
 from .base import *
+from .structure_duration_utils import maybe_interpolate_structure_duration
 
 import spacy
 import warnings
@@ -215,8 +216,13 @@ class PhonemeTokenizerConditioner(TextConditioner):
             else:
                 embeds = torch.cat((content_embeds, structure_embeds, sentence_idx_embeds), -1) # [T, N]
                 
-            if self.interpolate or (structure_dur is not None and structure_dur[b] is not None):
-                embeds = self.interpolate_with_structure_duration(tokens, embeds, structure_dur[b])
+            embeds = maybe_interpolate_structure_duration(
+                interpolate_fn=self.interpolate_with_structure_duration,
+                tokens=tokens,
+                embeds=embeds,
+                structure_dur=structure_dur,
+                batch_index=b,
+            )
             embeds_batch.append(embeds)
 
         # set batch_size = 1, [B, T, N]
