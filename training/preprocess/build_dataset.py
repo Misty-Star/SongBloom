@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import os
 import shlex
 import shutil
@@ -37,7 +38,15 @@ from .common import (
     write_jsonl,
 )
 from .extract_prompt import choose_prompt_window
-from .extract_structure import process_item as process_structure_item
+from .extract_structure import prepare_structure_assets, process_item as process_structure_item
+
+
+@dataclass
+class PreparedAudio:
+    path: str
+    wav: torch.Tensor
+    sample_rate: int
+    duration: float
 
 
 def convert_audio(
@@ -45,7 +54,7 @@ def convert_audio(
     output_path: str,
     sample_rate: int,
     mono: bool = False,
-) -> tp.Tuple[str, float]:
+) -> PreparedAudio:
     wav, sr = torchaudio.load(input_path)
     if sr != sample_rate:
         wav = torchaudio.transforms.Resample(sr, sample_rate)(wav)
@@ -56,7 +65,7 @@ def convert_audio(
     duration = wav.shape[-1] / sample_rate
     ensure_dir(os.path.dirname(output_path))
     torchaudio.save(output_path, wav, sample_rate)
-    return output_path, duration
+    return PreparedAudio(path=output_path, wav=wav, sample_rate=sample_rate, duration=duration)
 
 
 def run_demucs(
@@ -180,8 +189,14 @@ def save_prompt_audio(
     structure_segments: tp.Sequence[dict],
     prompt_path: tp.Optional[str] = None,
     prompt_start_sec: tp.Optional[float] = None,
+    wav: tp.Optional[torch.Tensor] = None,
+    wav_sample_rate: tp.Optional[int] = None,
 ) -> None:
-    wav, sr = torchaudio.load(prompt_path or audio_path)
+    if prompt_path is None and wav is not None:
+        sr = wav_sample_rate or sample_rate
+        wav = wav
+    else:
+        wav, sr = torchaudio.load(prompt_path or audio_path)
     if sr != sample_rate:
         wav = torchaudio.transforms.Resample(sr, sample_rate)(wav)
     if wav.shape[0] > 1:
@@ -234,18 +249,34 @@ class FeatureExtractorBundle:
             self._vq = SingleLayerVQ.from_pretrained(self.args.vq_ckpt).eval().to(self.args.device)
         return self._vq
 
-    def extract_latent(self, audio_path: str) -> torch.Tensor:
-        wav, sr = torchaudio.load(audio_path)
+    def extract_latent(
+        self,
+        audio_path: str,
+        wav: tp.Optional[torch.Tensor] = None,
+        sample_rate: tp.Optional[int] = None,
+    ) -> torch.Tensor:
+        if wav is None:
+            wav, sr = torchaudio.load(audio_path)
+        else:
+            sr = sample_rate or self.args.sample_rate
         if sr != self.args.sample_rate:
             wav = torchaudio.transforms.Resample(sr, self.args.sample_rate)(wav)
         with torch.no_grad():
             latent = self.vae.encode(wav.unsqueeze(0).to(self.args.device))
         return latent.squeeze(0).cpu()
 
-    def extract_sketch(self, audio_path: str) -> torch.Tensor:
+    def extract_sketch(
+        self,
+        audio_path: str,
+        wav: tp.Optional[torch.Tensor] = None,
+        sample_rate: tp.Optional[int] = None,
+    ) -> torch.Tensor:
         from .extract_sketch import extract_muq_embeddings
 
-        wav, sr = torchaudio.load(audio_path)
+        if wav is None:
+            wav, sr = torchaudio.load(audio_path)
+        else:
+            sr = sample_rate or self.args.sample_rate
         if sr != self.args.sample_rate:
             wav = torchaudio.transforms.Resample(sr, self.args.sample_rate)(wav)
         embeddings = extract_muq_embeddings(self.muq, wav, self.args.sample_rate)
@@ -351,6 +382,40 @@ def write_processed_lyrics(output_path: str, lyrics: str, lyric_processor: str) 
     return processed
 
 
+def prefetch_missing_structure_jsons(items: tp.Sequence[dict], args) -> tp.List[dict]:
+    needs_structure = any(not item.get("structure_json") for item in items)
+    if not needs_structure:
+        return [dict(item) for item in items]
+
+    log_progress("[build_dataset] structure prefetch start")
+    structure_items, structure_reports = prepare_structure_assets(
+        items=items,
+        assets_dir=os.path.join(args.workspace_dir, "_structure_assets"),
+        workspace_dir=os.path.join(args.workspace_dir, "_structure_prefetch"),
+        songformer_root=args.songformer_root,
+        python_exec=args.songformer_python,
+        gpu_num=args.songformer_gpu_num,
+        num_thread_per_gpu=args.songformer_threads,
+        model=args.songformer_model,
+        checkpoint=args.songformer_checkpoint,
+        config_path=args.songformer_config,
+        no_rule_post_processing=args.songformer_no_rule_post,
+        skip_existing=True,
+        timeout_sec=args.songformer_timeout_sec,
+    )
+    prefetched = 0
+    fallback = 0
+    for row in structure_reports:
+        if row.get("structure_status") in {"ok", "skipped_existing"}:
+            prefetched += 1
+        elif row.get("structure_status") == "error":
+            fallback += 1
+    log_progress(
+        f"[build_dataset] structure prefetch done prefetched={prefetched} fallback={fallback} total={len(structure_reports)}"
+    )
+    return structure_items
+
+
 def process_sample(item: dict, args, features: FeatureExtractorBundle, sample_index: int, total_items: int) -> dict:
     sample_id = get_item_id(item)
     sample_tag = f"[{sample_index}/{total_items}] {sample_id}"
@@ -364,7 +429,7 @@ def process_sample(item: dict, args, features: FeatureExtractorBundle, sample_in
         log_progress(f"{sample_tag} skip_existing meta.json already present")
         return {"id": sample_id, "status": "skipped", "output_dir": output_sample_dir}
 
-    (standardized_audio, duration), stage_timings["audio"] = run_stage(
+    standardized_audio, stage_timings["audio"] = run_stage(
         sample_tag,
         "audio",
         lambda: convert_audio(
@@ -374,17 +439,20 @@ def process_sample(item: dict, args, features: FeatureExtractorBundle, sample_in
             mono=False,
         ),
     )
-    if duration < args.min_duration or duration > args.max_duration:
-        raise StageError("audio", f"duration {duration:.2f}s outside [{args.min_duration}, {args.max_duration}]")
+    if standardized_audio.duration < args.min_duration or standardized_audio.duration > args.max_duration:
+        raise StageError(
+            "audio",
+            f"duration {standardized_audio.duration:.2f}s outside [{args.min_duration}, {args.max_duration}]",
+        )
 
     (vocals_path, no_vocals_path), stage_timings["stems"] = run_stage(
         sample_tag,
         "stems",
-        lambda: resolve_stems(item, standardized_audio, work_sample_dir, args),
+        lambda: resolve_stems(item, standardized_audio.path, work_sample_dir, args),
     )
 
     alignment_item = dict(item)
-    alignment_item["audio_path"] = standardized_audio
+    alignment_item["audio_path"] = standardized_audio.path
     alignment_item["vocals_path"] = vocals_path
     alignment, stage_timings["alignment"] = run_stage(
         sample_tag,
@@ -406,10 +474,10 @@ def process_sample(item: dict, args, features: FeatureExtractorBundle, sample_in
         raise StageError("alignment", f"low whisperx score: {alignment['whisperx_quality']['score']:.3f}")
 
     structure_item = dict(item)
-    structure_item["audio_path"] = standardized_audio
-    structure_item["songformer_audio_path"] = standardized_audio
+    structure_item["audio_path"] = standardized_audio.path
+    structure_item["songformer_audio_path"] = standardized_audio.path
     structure_item["lyrics_alignment_json"] = os.path.join(work_sample_dir, sample_id, "lyrics_alignment.json")
-    structure_item["duration_hint"] = duration
+    structure_item["duration_hint"] = standardized_audio.duration
     structure_payload, stage_timings["structure"] = run_stage(
         sample_tag,
         "structure",
@@ -461,31 +529,41 @@ def process_sample(item: dict, args, features: FeatureExtractorBundle, sample_in
         sample_tag,
         "prompt",
         lambda: save_prompt_audio(
-            audio_path=standardized_audio,
+            audio_path=standardized_audio.path,
             output_path=prompt_out,
             sample_rate=args.sample_rate,
             prompt_len=args.prompt_len,
             structure_segments=structure_payload["segments"],
             prompt_path=item.get("prompt_path"),
             prompt_start_sec=item.get("prompt_start_sec"),
+            wav=standardized_audio.wav,
+            wav_sample_rate=standardized_audio.sample_rate,
         ),
     )
 
     x_latent, stage_timings["latent"] = run_stage(
         sample_tag,
         "latent",
-        lambda: features.extract_latent(standardized_audio),
+        lambda: features.extract_latent(
+            standardized_audio.path,
+            wav=standardized_audio.wav,
+            sample_rate=standardized_audio.sample_rate,
+        ),
     )
     x_sketch, stage_timings["sketch"] = run_stage(
         sample_tag,
         "sketch",
-        lambda: features.extract_sketch(standardized_audio),
+        lambda: features.extract_sketch(
+            standardized_audio.path,
+            wav=standardized_audio.wav,
+            sample_rate=standardized_audio.sample_rate,
+        ),
     )
 
     effective_frames = min(
         x_latent.shape[-1],
         x_sketch.shape[0],
-        int(duration * args.target_fps),
+        int(standardized_audio.duration * args.target_fps),
     )
     effective_frames = (effective_frames // args.block_size) * args.block_size
     if effective_frames <= 0:
@@ -503,7 +581,7 @@ def process_sample(item: dict, args, features: FeatureExtractorBundle, sample_in
     meta = {
         "duration": round(effective_frames / args.target_fps, 3),
         "structure_duration": structure_duration,
-        "source_audio_path": standardized_audio,
+        "source_audio_path": standardized_audio.path,
         "vocals_path": vocals_path,
         "no_vocals_path": no_vocals_path,
         "whisperx_quality": alignment["whisperx_quality"],
@@ -590,9 +668,10 @@ def main() -> None:
         write_jsonl(
             os.path.join(args.output_dir, "report.jsonl"),
             [{"id": get_item_id(item), "status": "error", "error": error_message} for item in items],
-        )
+            )
         raise SystemExit(error_message)
 
+    items = prefetch_missing_structure_jsons(items, args)
     features = FeatureExtractorBundle(args)
     report_rows = []
     report_path = os.path.join(args.output_dir, "report.jsonl")
@@ -630,6 +709,10 @@ def main() -> None:
         log_progress(
             f"{sample_tag} progress ok={ok_count} error={err_count} skipped={skipped_count} total={len(report_rows)}/{total_items}"
         )
+
+    if not args.keep_intermediate:
+        shutil.rmtree(os.path.join(args.workspace_dir, "_structure_assets"), ignore_errors=True)
+        shutil.rmtree(os.path.join(args.workspace_dir, "_structure_prefetch"), ignore_errors=True)
 
     log_progress(f"[build_dataset] finished in {format_seconds(time.time() - build_started_at)}")
 

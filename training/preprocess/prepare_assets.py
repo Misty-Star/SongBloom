@@ -15,6 +15,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import sys
 import time
 import traceback
 import typing as tp
@@ -35,6 +36,8 @@ from .common import (
     normalize_whitespace,
     write_jsonl,
 )
+from .extract_structure import prepare_structure_assets
+from .structure_assets import compute_prepare_assets_status, merge_structure_preparation_results
 
 
 SEPARATOR_MODEL_ALIASES = {
@@ -203,6 +206,10 @@ def expected_whisperx_output(audio_path: str, output_dir: str) -> str:
     return os.path.abspath(os.path.join(output_dir, output_name))
 
 
+def expected_structure_output(sample_id: str, assets_dir: str) -> str:
+    return os.path.abspath(os.path.join(assets_dir, sample_id, "structure", sample_id + ".json"))
+
+
 def detect_separator_model_flag(separator_cmd: str, preferred_flag: str) -> str:
     if preferred_flag != "auto":
         return f"--{preferred_flag.lstrip('-')}"
@@ -237,10 +244,12 @@ def collect_preflight_issues(items: tp.Sequence[dict], args) -> tp.List[str]:
 
     needs_separator = False
     needs_whisperx = False
+    needs_structure = False
     for item in items:
+        sample_id = get_item_id(item)
         cached_vocals_path = None
         if not args.skip_separation and not (item.get("vocals_path") and item.get("no_vocals_path")):
-            cached_separator_dir = os.path.join(args.assets_dir, get_item_id(item), "separator")
+            cached_separator_dir = os.path.join(args.assets_dir, sample_id, "separator")
             try:
                 cached_vocals_path, _cached_no_vocals_path = find_separator_outputs(
                     cached_separator_dir,
@@ -250,7 +259,7 @@ def collect_preflight_issues(items: tp.Sequence[dict], args) -> tp.List[str]:
                 needs_separator = True
 
         if not args.skip_whisperx and not item.get("whisperx_json"):
-            whisperx_dir = os.path.join(args.assets_dir, get_item_id(item), "whisperx")
+            whisperx_dir = os.path.join(args.assets_dir, sample_id, "whisperx")
             whisperx_inputs = [
                 str(item.get("vocals_path")) if item.get("vocals_path") else "",
                 cached_vocals_path or "",
@@ -261,6 +270,13 @@ def collect_preflight_issues(items: tp.Sequence[dict], args) -> tp.List[str]:
                 for candidate in whisperx_inputs
             ):
                 needs_whisperx = True
+
+        if (
+            not args.skip_structure
+            and not item.get("structure_json")
+            and not os.path.exists(expected_structure_output(sample_id, args.assets_dir))
+        ):
+            needs_structure = True
 
     if needs_separator:
         separator_exec = resolve_command_name(args.separator_cmd)
@@ -287,6 +303,20 @@ def collect_preflight_issues(items: tp.Sequence[dict], args) -> tp.List[str]:
             issues.append(
                 f"WhisperX launcher {whisperx_exec!r} is not in PATH. "
                 "Install it in a dedicated environment or pass --whisperx-cmd."
+            )
+
+    if needs_structure:
+        songformer_exec = resolve_command_name(args.songformer_python)
+        infer_path = os.path.join(args.songformer_root, "src", "SongFormer", "infer", "infer.py")
+        if not command_exists(songformer_exec):
+            issues.append(
+                f"SongFormer python launcher {songformer_exec!r} is not in PATH. "
+                "Install SongFormer in a dedicated environment or pass --songformer-python."
+            )
+        if not os.path.exists(infer_path):
+            issues.append(
+                f"SongFormer infer script is missing: {infer_path}. "
+                "Check --songformer-root or initialize third_party/SongFormer."
             )
 
     return issues
@@ -380,16 +410,8 @@ def prepare_item(item: dict, args) -> tp.Tuple[dict, dict]:
     if not args.keep_intermediate:
         shutil.rmtree(workspace_sample_dir, ignore_errors=True)
 
-    if errors and (record.get("vocals_path") or record.get("whisperx_json")):
-        status = "partial"
-    elif errors:
-        status = "error"
-    else:
-        status = "ok"
-
     report = {
         "id": sample_id,
-        "status": status,
         "separator_status": separator_status,
         "whisperx_status": whisperx_status,
     }
@@ -401,6 +423,7 @@ def prepare_item(item: dict, args) -> tp.Tuple[dict, dict]:
         report["whisperx_json"] = record["whisperx_json"]
     if errors:
         report["errors"] = errors
+    report["status"] = compute_prepare_assets_status(record=record, report=report)
     return record, report
 
 
@@ -435,6 +458,17 @@ def main() -> None:
     parser.add_argument("--whisperx-compute-type", type=str, default="float16")
     parser.add_argument("--language", type=str, default=None)
     parser.add_argument("--whisperx-timeout-sec", type=float, default=0.0)
+
+    parser.add_argument("--skip-structure", action="store_true")
+    parser.add_argument("--songformer-root", type=str, default="third_party/SongFormer")
+    parser.add_argument("--songformer-python", type=str, default=sys.executable)
+    parser.add_argument("--songformer-gpu-num", type=int, default=1)
+    parser.add_argument("--songformer-threads", type=int, default=1)
+    parser.add_argument("--songformer-model", type=str, default="SongFormer")
+    parser.add_argument("--songformer-checkpoint", type=str, default="SongFormer.safetensors")
+    parser.add_argument("--songformer-config", type=str, default="SongFormer.yaml")
+    parser.add_argument("--songformer-no-rule-post", action="store_true")
+    parser.add_argument("--songformer-timeout-sec", type=float, default=0.0)
     args = parser.parse_args()
 
     args.assets_dir = ensure_dir(args.assets_dir)
@@ -467,6 +501,33 @@ def main() -> None:
         log_progress(
             f"{sample_tag} prepare_assets {report['status']} in {format_seconds(time.time() - sample_started_at)}"
         )
+
+    if not args.skip_structure and output_rows:
+        log_progress("[prepare_assets] structure batch start")
+        structure_items, structure_reports = prepare_structure_assets(
+            items=output_rows,
+            assets_dir=args.assets_dir,
+            workspace_dir=args.workspace_dir,
+            songformer_root=args.songformer_root,
+            python_exec=args.songformer_python,
+            gpu_num=args.songformer_gpu_num,
+            num_thread_per_gpu=args.songformer_threads,
+            model=args.songformer_model,
+            checkpoint=args.songformer_checkpoint,
+            config_path=args.songformer_config,
+            no_rule_post_processing=args.songformer_no_rule_post,
+            skip_existing=args.skip_existing,
+            timeout_sec=args.songformer_timeout_sec,
+        )
+        merge_structure_preparation_results(
+            output_rows=output_rows,
+            report_rows=report_rows,
+            structure_items=structure_items,
+            structure_reports=structure_reports,
+        )
+        write_jsonl(args.output_manifest, output_rows)
+        write_jsonl(args.report_path, report_rows)
+        log_progress("[prepare_assets] structure batch finished")
 
 
 if __name__ == "__main__":

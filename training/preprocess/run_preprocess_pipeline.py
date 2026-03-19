@@ -8,36 +8,7 @@ import subprocess
 import sys
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input-jsonl", type=str, required=True)
-    parser.add_argument("--prepared-manifest", type=str, required=True)
-    parser.add_argument("--assets-dir", type=str, required=True)
-    parser.add_argument("--output-dir", type=str, required=True)
-    parser.add_argument("--vq-ckpt", type=str, required=True)
-    parser.add_argument("--workspace-dir", type=str, default="")
-    parser.add_argument("--skip-existing", action="store_true")
-    parser.add_argument("--keep-intermediate", action="store_true")
-
-    parser.add_argument("--skip-separation", action="store_true")
-    parser.add_argument("--separator-cmd", type=str, default="conda run -n audiosep-py310 audio-separator")
-    parser.add_argument("--separator-model", type=str, default="BS-Roformer-Viperx-1297")
-    parser.add_argument("--separator-model-flag", type=str, default="auto", choices=["auto", "model_filename", "model_name"])
-    parser.add_argument("--separator-output-format", type=str, default="FLAC")
-    parser.add_argument("--separator-model-file-dir", type=str, default="")
-    parser.add_argument("--separator-numba-cache-dir", type=str, default="")
-    parser.add_argument("--separator-timeout-sec", type=float, default=0.0)
-
-    parser.add_argument("--skip-whisperx", action="store_true")
-    parser.add_argument("--whisperx-cmd", type=str, default="conda run -n whisperx whisperx")
-    parser.add_argument("--whisperx-model", type=str, default="large-v3")
-    parser.add_argument("--whisperx-device", type=str, default="cuda")
-    parser.add_argument("--whisperx-compute-type", type=str, default="float16")
-    parser.add_argument("--language", type=str, default=None)
-    parser.add_argument("--whisperx-timeout-sec", type=float, default=0.0)
-    parser.add_argument("--songformer-python", type=str, default="")
-    args, build_dataset_extra_args = parser.parse_known_args()
-
+def build_prepare_assets_cmd(args) -> list[str]:
     prepare_cmd = [
         sys.executable,
         "-m",
@@ -68,6 +39,22 @@ def main() -> None:
         args.whisperx_compute_type,
         "--whisperx-timeout-sec",
         str(args.whisperx_timeout_sec),
+        "--songformer-root",
+        args.songformer_root,
+        "--songformer-python",
+        args.songformer_python,
+        "--songformer-gpu-num",
+        str(args.songformer_gpu_num),
+        "--songformer-threads",
+        str(args.songformer_threads),
+        "--songformer-model",
+        args.songformer_model,
+        "--songformer-checkpoint",
+        args.songformer_checkpoint,
+        "--songformer-config",
+        args.songformer_config,
+        "--songformer-timeout-sec",
+        str(args.songformer_timeout_sec),
     ]
     if args.separator_model_file_dir:
         prepare_cmd += ["--separator-model-file-dir", args.separator_model_file_dir]
@@ -85,8 +72,14 @@ def main() -> None:
         prepare_cmd.append("--skip-separation")
     if args.skip_whisperx:
         prepare_cmd.append("--skip-whisperx")
-    subprocess.run(prepare_cmd, check=True)
+    if args.skip_structure:
+        prepare_cmd.append("--skip-structure")
+    if args.songformer_no_rule_post:
+        prepare_cmd.append("--songformer-no-rule-post")
+    return prepare_cmd
 
+
+def build_build_dataset_cmd(args, build_dataset_extra_args) -> list[str]:
     build_cmd = [
         sys.executable,
         "-m",
@@ -107,6 +100,52 @@ def main() -> None:
     if args.songformer_python:
         build_cmd += ["--songformer-python", args.songformer_python]
     build_cmd += build_dataset_extra_args
+    return build_cmd
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input-jsonl", type=str, required=True)
+    parser.add_argument("--prepared-manifest", type=str, required=True)
+    parser.add_argument("--assets-dir", type=str, required=True)
+    parser.add_argument("--output-dir", type=str, required=True)
+    parser.add_argument("--vq-ckpt", type=str, required=True)
+    parser.add_argument("--workspace-dir", type=str, default="")
+    parser.add_argument("--skip-existing", action="store_true")
+    parser.add_argument("--keep-intermediate", action="store_true")
+
+    parser.add_argument("--skip-separation", action="store_true")
+    parser.add_argument("--separator-cmd", type=str, default="conda run -n audiosep-py310 audio-separator")
+    parser.add_argument("--separator-model", type=str, default="BS-Roformer-Viperx-1297")
+    parser.add_argument("--separator-model-flag", type=str, default="auto", choices=["auto", "model_filename", "model_name"])
+    parser.add_argument("--separator-output-format", type=str, default="FLAC")
+    parser.add_argument("--separator-model-file-dir", type=str, default="")
+    parser.add_argument("--separator-numba-cache-dir", type=str, default="")
+    parser.add_argument("--separator-timeout-sec", type=float, default=0.0)
+
+    parser.add_argument("--skip-whisperx", action="store_true")
+    parser.add_argument("--whisperx-cmd", type=str, default="conda run -n whisperx whisperx")
+    parser.add_argument("--whisperx-model", type=str, default="large-v3")
+    parser.add_argument("--whisperx-device", type=str, default="cuda")
+    parser.add_argument("--whisperx-compute-type", type=str, default="float16")
+    parser.add_argument("--language", type=str, default=None)
+    parser.add_argument("--whisperx-timeout-sec", type=float, default=0.0)
+    parser.add_argument("--skip-structure", action="store_true")
+    parser.add_argument("--songformer-python", type=str, default="")
+    parser.add_argument("--songformer-root", type=str, default="third_party/SongFormer")
+    parser.add_argument("--songformer-gpu-num", type=int, default=1)
+    parser.add_argument("--songformer-threads", type=int, default=1)
+    parser.add_argument("--songformer-model", type=str, default="SongFormer")
+    parser.add_argument("--songformer-checkpoint", type=str, default="SongFormer.safetensors")
+    parser.add_argument("--songformer-config", type=str, default="SongFormer.yaml")
+    parser.add_argument("--songformer-no-rule-post", action="store_true")
+    parser.add_argument("--songformer-timeout-sec", type=float, default=0.0)
+    args, build_dataset_extra_args = parser.parse_known_args()
+
+    prepare_cmd = build_prepare_assets_cmd(args)
+    subprocess.run(prepare_cmd, check=True)
+
+    build_cmd = build_build_dataset_cmd(args, build_dataset_extra_args)
     subprocess.run(build_cmd, check=True)
 
 

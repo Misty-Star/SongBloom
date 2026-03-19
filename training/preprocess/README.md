@@ -67,7 +67,16 @@ python -m training.preprocess.fit_vq_codebook_kmeans \
 
 ## 主流程
 
-推荐把 `audio-separator` 和 `WhisperX` 放在独立环境中，先生成派生 manifest，再交给 `build_dataset`：
+当前推荐工作流是：
+
+```text
+raw_manifest.jsonl
+  -> prepare_assets
+  -> ready_manifest.jsonl
+  -> build_dataset
+```
+
+推荐把 `audio-separator`、`WhisperX`、`SongFormer` 放在独立环境中，先生成派生 manifest，再交给 `build_dataset`：
 
 ```bash
 python -m training.preprocess.prepare_assets \
@@ -75,7 +84,8 @@ python -m training.preprocess.prepare_assets \
   --output-manifest /path/to/ready_manifest.jsonl \
   --assets-dir /path/to/prepared_assets \
   --separator-cmd "conda run -n audiosep audio-separator" \
-  --whisperx-cmd "conda run -n whisperx whisperx"
+  --whisperx-cmd "conda run -n whisperx whisperx" \
+  --songformer-python "conda run -n songformer python"
 ```
 
 如果你希望单命令串联资产准备和最终数据集构建，可以使用：
@@ -98,7 +108,10 @@ python -m training.preprocess.run_preprocess_pipeline \
 2. 将输出写到 `prepared_assets/{sample_id}/separator/`
 3. 为缺失 `whisperx_json` 的样本调用 `WhisperX`
 4. 将输出写到 `prepared_assets/{sample_id}/whisperx/`
-5. 生成一个派生 manifest（例如 `ready_manifest.jsonl`）
+5. 为缺失 `structure_json` 的样本批量调用 `SongFormer`
+6. 将结构输出写到 `prepared_assets/{sample_id}/structure/{sample_id}.json`
+7. 生成一个派生 manifest（例如 `ready_manifest.jsonl`）
+8. 写出 `prepare_assets_report.jsonl`，其中会记录 `separator_status`、`whisperx_status`、`structure_status`
 
 ```bash
 python -m training.preprocess.build_dataset \
@@ -119,13 +132,20 @@ python -m training.preprocess.build_dataset \
 
 主流程会按顺序执行：
 
-1. 标准化原始音频
-2. 读取 manifest 中已有的 `vocals_path` / `no_vocals_path`，缺失时回退到 `Demucs`
-3. 读取 manifest 中已有的 `whisperx_json`，缺失时回退到在线 `WhisperX`
-4. `third_party/SongFormer` 提取结构并生成 `structure_segments.json`
-5. 生成 SongBloom 训练所需的结构化歌词与 `structure_duration`
-6. 提取 `prompt_wav.flac`、`x_latent.pt`、`x_sketch.pt`
-7. 写出最终 `meta.json`
+1. `prepare_assets` 优先补齐 `vocals_path` / `no_vocals_path`
+2. `prepare_assets` 优先补齐 `whisperx_json`
+3. `prepare_assets` 批量补齐 `structure_json`
+4. `build_dataset` 标准化原始音频
+5. `build_dataset` 根据 WhisperX + SongFormer 结果生成 SongBloom 所需的结构化歌词与 `structure_duration`
+6. `build_dataset` 提取 `prompt_wav.flac`、`x_latent.pt`、`x_sketch.pt`
+7. `build_dataset` 写出最终 `meta.json`
+
+说明：
+
+- `build_dataset` 仍然可以直接消费原始 manifest
+- 如果直接传原始 manifest 且缺 `structure_json`，当前实现会在逐样本处理前先批量预取结构结果
+- 但如果还缺 `vocals_path` / `no_vocals_path` 或 `whisperx_json`，这些阶段仍会落回样本循环，所以最佳吞吐依然是先跑 `prepare_assets`
+- `build_dataset` 当前会复用同一份标准化 waveform 生成 `prompt_wav.flac`、`x_latent.pt`、`x_sketch.pt`，避免对同一首歌重复读盘和重复重采样
 
 其中歌词清洗阶段会优先过滤常见的：
 
@@ -168,3 +188,14 @@ sample_dir/
 - `structure_duration`
 - `whisperx_quality`
 - `songformer_segments`
+
+如果你走推荐工作流，额外还会看到：
+
+```text
+prepared_assets/
+  <sample_id>/
+    separator/
+    whisperx/
+    structure/
+      <sample_id>.json
+```

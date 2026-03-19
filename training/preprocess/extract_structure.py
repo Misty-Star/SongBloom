@@ -15,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import typing as tp
 
@@ -224,6 +225,244 @@ def _truncate_subprocess_log(text: str, max_len: int = 600) -> str:
     if len(normalized) <= max_len:
         return normalized
     return normalized[: max_len - 3] + "..."
+
+
+def _link_or_copy_audio(src_path: str, dst_path: str) -> str:
+    ensure_dir(os.path.dirname(dst_path))
+    if os.path.lexists(dst_path):
+        os.unlink(dst_path)
+    src_abs = os.path.abspath(src_path)
+    try:
+        os.symlink(src_abs, dst_path)
+    except OSError:
+        shutil.copyfile(src_abs, dst_path)
+    return dst_path
+
+
+def build_songformer_batch_inputs(
+    items: tp.Sequence[dict],
+    input_dir: str,
+) -> tp.Dict[str, str]:
+    audio_inputs: tp.Dict[str, str] = {}
+    ensure_dir(input_dir)
+    for item in items:
+        sample_id = get_item_id(item)
+        source_audio = item.get("songformer_audio_path") or get_audio_path(item)
+        suffix = os.path.splitext(str(source_audio))[1] or ".wav"
+        batch_audio_path = os.path.join(input_dir, sample_id + suffix.lower())
+        audio_inputs[sample_id] = _link_or_copy_audio(str(source_audio), batch_audio_path)
+    return audio_inputs
+
+
+def run_songformer_batch(
+    audio_inputs: tp.Mapping[str, str],
+    output_dir: str,
+    songformer_root: str,
+    python_exec: str,
+    gpu_num: int,
+    num_thread_per_gpu: int,
+    model: str,
+    checkpoint: str,
+    config_path: str,
+    no_rule_post_processing: bool,
+    timeout_sec: tp.Optional[float] = None,
+) -> tp.Dict[str, str]:
+    if not audio_inputs:
+        return {}
+
+    infer_dir = os.path.join(songformer_root, "src", "SongFormer")
+    if not os.path.exists(os.path.join(infer_dir, "infer", "infer.py")):
+        raise FileNotFoundError(f"SongFormer infer script not found under {infer_dir}")
+
+    python_cmd = shlex.split(python_exec)
+    if not python_cmd:
+        raise ValueError("`python_exec` is empty.")
+
+    ensure_dir(output_dir)
+    scp_tmp_dir = tempfile.mkdtemp(prefix="songformer_batch_scp_")
+    scp_path = os.path.join(scp_tmp_dir, "input.scp")
+    try:
+        with open(scp_path, "w", encoding="utf-8") as handle:
+            for audio_path in audio_inputs.values():
+                handle.write(audio_path + "\n")
+
+        env = os.environ.copy()
+        infer_dir_abs = os.path.abspath(infer_dir)
+        third_party_dir = os.path.abspath(os.path.normpath(os.path.join(infer_dir, "..", "third_party")))
+        pythonpath_entries = [infer_dir_abs, third_party_dir]
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        if existing_pythonpath:
+            pythonpath_entries.append(existing_pythonpath)
+        env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
+        env.setdefault("OMP_NUM_THREADS", "1")
+        env.setdefault("MPI_NUM_THREADS", "1")
+        env.setdefault("NCCL_P2P_DISABLE", "1")
+        env.setdefault("NCCL_IB_DISABLE", "1")
+
+        argv = python_cmd + [
+            os.path.join("infer", "infer.py"),
+            "-i",
+            scp_path,
+            "-o",
+            output_dir,
+            "-gn",
+            str(gpu_num),
+            "-tn",
+            str(num_thread_per_gpu),
+            "--model",
+            model,
+            "--checkpoint",
+            checkpoint,
+            "--config_path",
+            config_path,
+        ]
+        if no_rule_post_processing:
+            argv.append("--no_rule_post_processing")
+
+        started_at = time.time()
+        log_progress(f"[songformer] batch start count={len(audio_inputs)}")
+        completed = subprocess.run(
+            argv,
+            cwd=infer_dir,
+            env=env,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=None if not timeout_sec or timeout_sec <= 0 else timeout_sec,
+        )
+        log_progress(
+            f"[songformer] batch done count={len(audio_inputs)} in {format_seconds(time.time() - started_at)}"
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        details = describe_subprocess_failure(exc)
+        if details:
+            raise RuntimeError(f"SongFormer batch inference failed: {details}") from exc
+        raise
+    finally:
+        shutil.rmtree(scp_tmp_dir, ignore_errors=True)
+
+    resolved: tp.Dict[str, str] = {}
+    missing: tp.List[str] = []
+    for sample_id, audio_path in audio_inputs.items():
+        expected_path = os.path.join(output_dir, f"{os.path.splitext(os.path.basename(audio_path))[0]}.json")
+        if os.path.exists(expected_path):
+            resolved[sample_id] = os.path.abspath(expected_path)
+        else:
+            missing.append(f"{sample_id}:{expected_path}")
+
+    if not resolved:
+        error_parts = ["SongFormer batch outputs not found"]
+        if missing:
+            error_parts.append(", ".join(missing[:10]))
+        stderr_text = _truncate_subprocess_log(completed.stderr or "")
+        stdout_text = _truncate_subprocess_log(completed.stdout or "")
+        if stderr_text:
+            error_parts.append(f"stderr={stderr_text}")
+        elif stdout_text:
+            error_parts.append(f"stdout={stdout_text}")
+        raise FileNotFoundError(". ".join(error_parts))
+
+    if missing:
+        log_progress(
+            "[songformer] batch missing outputs for "
+            + ", ".join(item.split(":", 1)[0] for item in missing[:10])
+        )
+    return resolved
+
+
+def prepare_structure_assets(
+    items: tp.Sequence[dict],
+    assets_dir: str,
+    workspace_dir: str,
+    songformer_root: str = "third_party/SongFormer",
+    python_exec: str = sys.executable,
+    gpu_num: int = 1,
+    num_thread_per_gpu: int = 1,
+    model: str = "SongFormer",
+    checkpoint: str = "SongFormer.safetensors",
+    config_path: str = "SongFormer.yaml",
+    no_rule_post_processing: bool = False,
+    skip_existing: bool = False,
+    timeout_sec: tp.Optional[float] = None,
+) -> tp.Tuple[tp.List[dict], tp.List[dict]]:
+    updated_items = [dict(item) for item in items]
+    report_rows: tp.List[dict] = []
+    report_by_id: tp.Dict[str, dict] = {}
+    pending_items: tp.List[dict] = []
+
+    for item in updated_items:
+        sample_id = get_item_id(item)
+        report = {"id": sample_id}
+        report_by_id[sample_id] = report
+        report_rows.append(report)
+
+        provided_path = item.get("structure_json")
+        if provided_path and os.path.exists(str(provided_path)):
+            item["structure_json"] = os.path.abspath(str(provided_path))
+            report["structure_status"] = "provided"
+            report["structure_json"] = item["structure_json"]
+            continue
+
+        cached_path = os.path.abspath(os.path.join(assets_dir, sample_id, "structure", sample_id + ".json"))
+        if skip_existing and os.path.exists(cached_path):
+            item["structure_json"] = cached_path
+            report["structure_status"] = "skipped_existing"
+            report["structure_json"] = cached_path
+            continue
+
+        pending_items.append(item)
+
+    if not pending_items:
+        return updated_items, report_rows
+
+    batch_root = ensure_dir(os.path.join(workspace_dir, "_structure_batch"))
+    batch_dir = tempfile.mkdtemp(prefix="songformer_batch_", dir=batch_root)
+    try:
+        batch_input_dir = os.path.join(batch_dir, "inputs")
+        batch_output_dir = os.path.join(batch_dir, "outputs")
+        audio_inputs = build_songformer_batch_inputs(pending_items, batch_input_dir)
+        batch_outputs = run_songformer_batch(
+            audio_inputs=audio_inputs,
+            output_dir=batch_output_dir,
+            songformer_root=songformer_root,
+            python_exec=python_exec,
+            gpu_num=gpu_num,
+            num_thread_per_gpu=num_thread_per_gpu,
+            model=model,
+            checkpoint=checkpoint,
+            config_path=config_path,
+            no_rule_post_processing=no_rule_post_processing,
+            timeout_sec=timeout_sec,
+        )
+    except Exception as exc:
+        error_message = str(exc)
+        for item in pending_items:
+            report = report_by_id[get_item_id(item)]
+            report["structure_status"] = "error"
+            report["error"] = error_message
+        return updated_items, report_rows
+
+    try:
+        for item in pending_items:
+            sample_id = get_item_id(item)
+            report = report_by_id[sample_id]
+            batch_output_path = batch_outputs.get(sample_id)
+            if not batch_output_path or not os.path.exists(batch_output_path):
+                report["structure_status"] = "error"
+                report["error"] = f"SongFormer batch output not found for {sample_id}"
+                continue
+
+            structure_dir = ensure_dir(os.path.join(assets_dir, sample_id, "structure"))
+            structure_json = os.path.abspath(os.path.join(structure_dir, sample_id + ".json"))
+            shutil.copyfile(batch_output_path, structure_json)
+            item["structure_json"] = structure_json
+            report["structure_status"] = "ok"
+            report["structure_json"] = structure_json
+    finally:
+        shutil.rmtree(batch_dir, ignore_errors=True)
+
+    return updated_items, report_rows
 
 
 def run_songformer(
