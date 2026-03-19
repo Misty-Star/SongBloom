@@ -20,6 +20,7 @@ from lightning.pytorch.strategies import DeepSpeedStrategy
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from SongBloom.models.songbloom.songbloom_pl import SongBloom_PL
+from training.config_normalization import ensure_songbloom_config_defaults
 from training.datamodule import SongBloomDataModule
 from training.trainer_config import (
     get_trainer_root_dir,
@@ -33,7 +34,7 @@ def load_config(cfg_file):
     OmegaConf.register_new_resolver("get_fname", lambda x: os.path.splitext(os.path.basename(x))[0], replace=True)
     OmegaConf.register_new_resolver("load_yaml", lambda x: OmegaConf.load(x), replace=True)
     OmegaConf.register_new_resolver("dynamic_path", lambda x: x.replace("???", os.path.dirname(cfg_file)), replace=True)
-    return OmegaConf.load(cfg_file)
+    return ensure_songbloom_config_defaults(OmegaConf.load(cfg_file))
 
 
 def main():

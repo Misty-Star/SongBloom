@@ -16,6 +16,7 @@ import lightning as pl
 import os, sys
 
 from training.dropout_utils import apply_condition_dropouts
+from training.config_normalization import ensure_songbloom_config_defaults
 
 from ..musicgen.conditioners import WavCondition, JointEmbedCondition, ConditioningAttributes
 from ..vae_frontend import StableVAE
@@ -170,6 +171,7 @@ class SongBloom_Sampler:
 
     @classmethod
     def build_from_trainer(cls, cfg, strict=True, dtype=torch.float32, device=None):
+        cfg = ensure_songbloom_config_defaults(cfg)
         model_light = SongBloom_PL(cfg)
         incompatible = model_light.load_state_dict(torch.load(cfg.pretrained_path, map_location='cpu'), strict=strict)
         

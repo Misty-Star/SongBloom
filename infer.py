@@ -8,6 +8,7 @@ from huggingface_hub import hf_hub_download
 os.environ['DISABLE_FLASH_ATTN'] = "1"
 from SongBloom.models.songbloom.songbloom_pl import SongBloom_Sampler
 from normalize_lyrics import clean_lyrics
+from training.config_normalization import ensure_songbloom_config_defaults
 
 NAME2REPO = {
     "songbloom_full_150s" : "CypressYang/SongBloom",
@@ -52,7 +53,7 @@ def load_config(cfg_file, parent_dir="./") -> DictConfig:
                 else OmegaConf.create()
     
 
-    return file_cfg
+    return ensure_songbloom_config_defaults(file_cfg)
 
 
 
