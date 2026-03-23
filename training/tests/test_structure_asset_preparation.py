@@ -154,16 +154,16 @@ class StructureAssetPreparationTest(unittest.TestCase):
             with mock.patch.dict(sys.modules, {"torchaudio": mock.MagicMock()}):
                 prepare_assets = importlib.import_module("training.preprocess.prepare_assets")
 
-            def fake_prepare_item(item, args):
-                return (
-                    dict(item),
-                    {
-                        "id": item["id"],
-                        "status": "ok",
-                        "separator_status": "provided",
-                        "whisperx_status": "provided",
-                    },
-                )
+            def fake_prepare_separator_assets(output_rows, report_rows, args):
+                output_rows[0]["vocals_path"] = "/tmp/song_a_vocals.flac"
+                output_rows[0]["no_vocals_path"] = "/tmp/song_a_no_vocals.flac"
+                report_rows[0]["separator_status"] = "ok"
+                report_rows[0]["status"] = "ok"
+
+            def fake_prepare_whisperx_assets(output_rows, report_rows, args):
+                output_rows[0]["whisperx_json"] = "/tmp/song_a_whisperx.json"
+                report_rows[0]["whisperx_status"] = "ok"
+                report_rows[0]["status"] = "ok"
 
             def fake_prepare_structure_assets(**kwargs):
                 return (
@@ -185,8 +185,12 @@ class StructureAssetPreparationTest(unittest.TestCase):
 
             with mock.patch.object(prepare_assets, "collect_preflight_issues", return_value=[]), mock.patch.object(
                 prepare_assets,
-                "prepare_item",
-                side_effect=fake_prepare_item,
+                "prepare_separator_assets",
+                side_effect=fake_prepare_separator_assets,
+            ), mock.patch.object(
+                prepare_assets,
+                "prepare_whisperx_assets",
+                side_effect=fake_prepare_whisperx_assets,
             ), mock.patch.object(
                 prepare_assets,
                 "prepare_structure_assets",

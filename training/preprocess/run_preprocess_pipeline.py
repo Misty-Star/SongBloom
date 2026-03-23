@@ -21,6 +21,8 @@ def build_prepare_assets_cmd(args) -> list[str]:
         args.assets_dir,
         "--separator-cmd",
         args.separator_cmd,
+        "--separator-python",
+        args.separator_python,
         "--separator-model",
         args.separator_model,
         "--separator-model-flag",
@@ -29,6 +31,8 @@ def build_prepare_assets_cmd(args) -> list[str]:
         args.separator_output_format,
         "--separator-timeout-sec",
         str(args.separator_timeout_sec),
+        "--separator-max-files-per-batch",
+        str(args.separator_max_files_per_batch),
         "--whisperx-cmd",
         args.whisperx_cmd,
         "--whisperx-model",
@@ -37,8 +41,12 @@ def build_prepare_assets_cmd(args) -> list[str]:
         args.whisperx_device,
         "--whisperx-compute-type",
         args.whisperx_compute_type,
+        "--whisperx-batch-size",
+        str(args.whisperx_batch_size),
         "--whisperx-timeout-sec",
         str(args.whisperx_timeout_sec),
+        "--whisperx-max-files-per-batch",
+        str(args.whisperx_max_files_per_batch),
         "--songformer-root",
         args.songformer_root,
         "--songformer-python",
@@ -116,20 +124,24 @@ def main() -> None:
 
     parser.add_argument("--skip-separation", action="store_true")
     parser.add_argument("--separator-cmd", type=str, default="conda run -n audiosep-py310 audio-separator")
+    parser.add_argument("--separator-python", type=str, default="")
     parser.add_argument("--separator-model", type=str, default="BS-Roformer-Viperx-1297")
     parser.add_argument("--separator-model-flag", type=str, default="auto", choices=["auto", "model_filename", "model_name"])
     parser.add_argument("--separator-output-format", type=str, default="FLAC")
     parser.add_argument("--separator-model-file-dir", type=str, default="")
     parser.add_argument("--separator-numba-cache-dir", type=str, default="")
     parser.add_argument("--separator-timeout-sec", type=float, default=0.0)
+    parser.add_argument("--separator-max-files-per-batch", type=int, default=32)
 
     parser.add_argument("--skip-whisperx", action="store_true")
     parser.add_argument("--whisperx-cmd", type=str, default="conda run -n whisperx whisperx")
     parser.add_argument("--whisperx-model", type=str, default="large-v3")
     parser.add_argument("--whisperx-device", type=str, default="cuda")
     parser.add_argument("--whisperx-compute-type", type=str, default="float16")
+    parser.add_argument("--whisperx-batch-size", type=int, default=8)
     parser.add_argument("--language", type=str, default=None)
     parser.add_argument("--whisperx-timeout-sec", type=float, default=0.0)
+    parser.add_argument("--whisperx-max-files-per-batch", type=int, default=32)
     parser.add_argument("--skip-structure", action="store_true")
     parser.add_argument("--songformer-python", type=str, default="")
     parser.add_argument("--songformer-root", type=str, default="third_party/SongFormer")

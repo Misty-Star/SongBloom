@@ -84,7 +84,9 @@ python -m training.preprocess.prepare_assets \
   --output-manifest /path/to/ready_manifest.jsonl \
   --assets-dir /path/to/prepared_assets \
   --separator-cmd "conda run -n audiosep audio-separator" \
+  --separator-python "conda run -n audiosep python" \
   --whisperx-cmd "conda run -n whisperx whisperx" \
+  --whisperx-batch-size 8 \
   --songformer-python "conda run -n songformer python"
 ```
 
@@ -98,20 +100,28 @@ python -m training.preprocess.run_preprocess_pipeline \
   --output-dir /path/to/processed_dataset \
   --vq-ckpt /path/to/vq_codebook.pt \
   --separator-cmd "conda run -n audiosep audio-separator" \
+  --separator-python "conda run -n audiosep python" \
   --whisperx-cmd "conda run -n whisperx whisperx" \
+  --whisperx-batch-size 8 \
   --songformer-python "conda run -n songformer python"
 ```
 
 `prepare_assets` 会：
 
-1. 为缺失 stems 的样本调用 `audio-separator`
+1. 为缺失 stems 的样本按批调用 `audio-separator`（通过单进程 batch runner 复用模型）
 2. 将输出写到 `prepared_assets/{sample_id}/separator/`
-3. 为缺失 `whisperx_json` 的样本调用 `WhisperX`
+3. 为缺失 `whisperx_json` 的样本按语言分组批量调用 `WhisperX`
 4. 将输出写到 `prepared_assets/{sample_id}/whisperx/`
 5. 为缺失 `structure_json` 的样本批量调用 `SongFormer`
 6. 将结构输出写到 `prepared_assets/{sample_id}/structure/{sample_id}.json`
 7. 生成一个派生 manifest（例如 `ready_manifest.jsonl`）
 8. 写出 `prepare_assets_report.jsonl`，其中会记录 `separator_status`、`whisperx_status`、`structure_status`
+
+补充说明：
+
+- `audio-separator` CLI 本身只接受单个 `audio_file`，当前仓库会在 `--separator-python` 指向的环境里启动 `training.preprocess.audio_separator_batch_runner`，一次加载模型后串行处理当前批次的多首歌
+- `WhisperX` CLI 原生支持 `audio [audio ...]` 多输入，当前仓库会把同语言样本放进同一批，并在整批失败时自动二分拆批，直到把报错样本隔离出来
+- 对于纯音乐 / 无语音样本，WhisperX 批处理失败不会拖垮整批；最终只会把出错样本标成 `whisperx_status=error`，其他样本继续落盘
 
 ```bash
 python -m training.preprocess.build_dataset \
