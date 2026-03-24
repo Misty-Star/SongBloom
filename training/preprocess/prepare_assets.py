@@ -277,6 +277,10 @@ def append_stage_error(report: dict, stage: str, error: tp.Union[str, Exception]
     report.setdefault("errors", []).append({"stage": stage, "error": message or f"{stage} failed"})
 
 
+def log_stage_item_status(stage: str, sample_id: str, status: str) -> None:
+    log_progress(f"[prepare_assets] {stage} {sample_id} {status}")
+
+
 def update_report_status(record: dict, report: dict) -> None:
     report["status"] = compute_prepare_assets_status(record=record, report=report)
 
@@ -367,7 +371,34 @@ def prepare_separator_assets(output_rows: tp.List[dict], report_rows: tp.List[di
         return
 
     report_by_id = {str(row["id"]): row for row in report_rows}
+    record_by_id = {get_item_id(row): row for row in output_rows}
     pending: tp.List[dict] = []
+
+    batch_counter = 0
+
+    def flush_pending_batch() -> None:
+        nonlocal pending
+        nonlocal batch_counter
+        if not pending:
+            return
+        batch_counter += 1
+        log_progress(f"[prepare_assets] separator batch {batch_counter} size={len(pending)}")
+        results, errors = run_audio_separator_batch(pending, args)
+        for batch_item in pending:
+            sample_id = get_item_id(batch_item)
+            record = record_by_id[sample_id]
+            report = report_by_id[sample_id]
+            if sample_id in results:
+                record["vocals_path"] = results[sample_id]["vocals_path"]
+                record["no_vocals_path"] = results[sample_id]["no_vocals_path"]
+                report["separator_status"] = "ok"
+                log_stage_item_status("separator", sample_id, "ok")
+            else:
+                report["separator_status"] = "error"
+                append_stage_error(report, "separator", errors.get(sample_id, "audio-separator batch failed"))
+                log_stage_item_status("separator", sample_id, "error")
+            update_report_status(record, report)
+        pending = []
 
     for record in output_rows:
         sample_id = get_item_id(record)
@@ -385,6 +416,7 @@ def prepare_separator_assets(output_rows: tp.List[dict], report_rows: tp.List[di
                 record["no_vocals_path"] = no_vocals_path
                 report["separator_status"] = "skipped_existing"
                 update_report_status(record, report)
+                log_stage_item_status("separator", sample_id, "skipped_existing")
                 continue
             except FileNotFoundError:
                 pass
@@ -410,26 +442,12 @@ def prepare_separator_assets(output_rows: tp.List[dict], report_rows: tp.List[di
             report["separator_status"] = "error"
             append_stage_error(report, "separator", exc)
             update_report_status(record, report)
+            log_stage_item_status("separator", sample_id, "error")
 
-    if not pending:
-        return
+        if len(pending) >= args.separator_max_files_per_batch:
+            flush_pending_batch()
 
-    total_batches = (len(pending) + args.separator_max_files_per_batch - 1) // args.separator_max_files_per_batch
-    for batch_index, batch_items in enumerate(chunk_items(pending, args.separator_max_files_per_batch), start=1):
-        log_progress(f"[prepare_assets] separator batch {batch_index}/{total_batches} size={len(batch_items)}")
-        results, errors = run_audio_separator_batch(batch_items, args)
-        for batch_item in batch_items:
-            sample_id = get_item_id(batch_item)
-            record = next(row for row in output_rows if get_item_id(row) == sample_id)
-            report = report_by_id[sample_id]
-            if sample_id in results:
-                record["vocals_path"] = results[sample_id]["vocals_path"]
-                record["no_vocals_path"] = results[sample_id]["no_vocals_path"]
-                report["separator_status"] = "ok"
-            else:
-                report["separator_status"] = "error"
-                append_stage_error(report, "separator", errors.get(sample_id, "audio-separator batch failed"))
-            update_report_status(record, report)
+    flush_pending_batch()
 
 
 def run_whisperx_batch_cli(
@@ -555,6 +573,7 @@ def prepare_whisperx_assets(output_rows: tp.List[dict], report_rows: tp.List[dic
             record["whisperx_json"] = existing_json
             report["whisperx_status"] = "skipped_existing"
             update_report_status(record, report)
+            log_stage_item_status("whisperx", sample_id, "skipped_existing")
             continue
 
         language = record.get("language", args.language)
@@ -598,9 +617,11 @@ def prepare_whisperx_assets(output_rows: tp.List[dict], report_rows: tp.List[dic
                         shutil.copyfile(results[sample_id], whisperx_json)
                         record["whisperx_json"] = whisperx_json
                         report["whisperx_status"] = "ok"
+                        log_stage_item_status("whisperx", sample_id, "ok")
                     else:
                         report["whisperx_status"] = "error"
                         append_stage_error(report, "whisperx", errors.get(sample_id, "WhisperX batch failed"))
+                        log_stage_item_status("whisperx", sample_id, "error")
                     update_report_status(record, report)
             finally:
                 shutil.rmtree(batch_root, ignore_errors=True)
