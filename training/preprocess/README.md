@@ -65,6 +65,65 @@ python -m training.preprocess.fit_vq_codebook_kmeans \
 
 之所以命名为 `fit_vq_codebook_kmeans.py`，是为了和后续可能加入的正式 VQ / RVQ 训练方案明确区分。
 
+如果你的目标是**先验证兼容性、尽快开始构建 `x_sketch.pt`**，优先用上面的 `fit_vq_codebook_kmeans.py`。
+
+如果你的目标是**效果优先**，当前仓库额外提供了一套更完整的候选训练与筛选流程：
+
+```bash
+# 1) 训练单个 streaming K-Means codebook
+python -m training.preprocess.fit_vq_codebook_streaming \
+  --input-jsonl /path/to/raw_manifest.jsonl \
+  --output-path /path/to/vq_codebook_streaming.pt \
+  --device cuda:0 \
+  --max-total-train-frames 200000 \
+  --max-total-heldout-frames 50000
+
+# 2) 在 heldout 帧上单独评估现有 codebook
+python -m training.preprocess.evaluate_vq_codebook \
+  --input-jsonl /path/to/raw_manifest.jsonl \
+  --codebook-path /path/to/vq_codebook_streaming.pt \
+  --report-path /path/to/vq_codebook_streaming.evaluation.report.json \
+  --device cuda:0
+
+# 3) 按多 seed / 多 frame budget 批量搜索候选
+python -m training.preprocess.search_vq_codebook_candidates \
+  --input-jsonl /path/to/raw_manifest.jsonl \
+  --output-dir /path/to/vq_candidates \
+  --seeds 11 17 29 \
+  --frame-budgets 200000 400000 \
+  --device cuda:0
+```
+
+这条“效果优先”工作流的设计目标是：
+
+- 保持与论文和当前训练实现一致的 **MuQ + 单层 16384 code + 25fps**
+- 保持输出仍然兼容 `extract_sketch.py` / `build_dataset.py`
+- 通过 heldout `quantization_mse`、`dead_code_ratio`、`usage_entropy`、`top_1_usage_share` 先筛掉明显塌缩的候选
+- 再用小规模 SongBloom proxy run 做最终决策，而不是只看聚类误差
+
+推荐的候选筛选顺序：
+
+1. 先剔除 `dead_code_ratio` 过高或 `top_1_usage_share` 过大的候选
+2. 在剩余候选里优先看更低的 `quantization_mse`
+3. 对前 1 到 2 个候选分别构建小规模 `processed_dataset`
+4. 使用 `training/configs/songbloom_vq_proxy_eval.yaml` 跑 100-step proxy run，比对 `train/L_LM`
+
+proxy run 命令示例：
+
+```bash
+python -m training.train --config training/configs/songbloom_vq_proxy_eval.yaml
+```
+
+其中 `fit_vq_codebook_streaming.py` 会额外写出：
+
+- `vq_codebook_streaming.pt`
+- `vq_codebook_streaming.meta.json`
+- `vq_codebook_streaming.report.json`
+
+而 `search_vq_codebook_candidates.py` 会在输出目录下汇总一个：
+
+- `candidate_summary.json`
+
 ## 主流程
 
 当前推荐工作流是：
