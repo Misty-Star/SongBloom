@@ -38,7 +38,11 @@ from .common import (
     write_jsonl,
 )
 from .extract_prompt import choose_prompt_window
-from .extract_structure import prepare_structure_assets, process_item as process_structure_item
+from .extract_structure import (
+    collect_songformer_runtime_issues,
+    prepare_structure_assets,
+    process_item as process_structure_item,
+)
 
 
 @dataclass
@@ -369,6 +373,8 @@ def collect_preflight_issues(items: tp.Sequence[dict], args) -> tp.List[str]:
                 f"SongFormer infer script is missing: {infer_path}. "
                 "Check --songformer-root or initialize the third_party/SongFormer dependency."
             )
+        if command_exists(songformer_exec) and os.path.exists(infer_path):
+            issues.extend(collect_songformer_runtime_issues(args.songformer_python))
 
     return issues
 

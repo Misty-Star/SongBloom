@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import shutil
@@ -49,6 +50,104 @@ SONGFORMER_LABEL_MAP = {
 }
 VOCAL_LABELS = {"[verse]", "[chorus]", "[bridge]"}
 NON_VOCAL_LABELS = {"[intro]", "[inst]", "[outro]"}
+
+
+def _parse_major_version(version_text: str) -> tp.Optional[int]:
+    head = str(version_text).strip().split(".", 1)[0]
+    return int(head) if head.isdigit() else None
+
+
+def collect_songformer_runtime_issues(
+    python_exec: str,
+    probe_timeout_sec: float = 30.0,
+) -> tp.List[str]:
+    python_cmd = shlex.split(python_exec)
+    if not python_cmd:
+        return ["SongFormer python launcher command is empty."]
+
+    probe_code = "\n".join(
+        [
+            "import json",
+            "info = {}",
+            "try:",
+            "    import torch",
+            "    info['torch_version'] = getattr(torch, '__version__', '')",
+            "    info['cuda_available'] = bool(torch.cuda.is_available())",
+            "    if info['cuda_available']:",
+            "        capability = torch.cuda.get_device_capability(0)",
+            "        info['device_capability'] = f\"sm_{capability[0]}{capability[1]}\"",
+            "        info['arch_list'] = list(torch.cuda.get_arch_list())",
+            "except Exception as exc:",
+            "    info['torch_error'] = repr(exc)",
+            "try:",
+            "    import numpy as np",
+            "    info['numpy_version'] = getattr(np, '__version__', '')",
+            "except Exception as exc:",
+            "    info['numpy_error'] = repr(exc)",
+            "print(json.dumps(info, ensure_ascii=False))",
+        ]
+    )
+
+    try:
+        completed = subprocess.run(
+            python_cmd + ["-c", probe_code],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=probe_timeout_sec,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        details = describe_subprocess_failure(exc)
+        if details:
+            return [f"SongFormer runtime probe failed: {details}"]
+        return ["SongFormer runtime probe failed."]
+
+    stdout_lines = [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
+    if not stdout_lines:
+        return []
+
+    try:
+        info = json.loads(stdout_lines[-1])
+    except json.JSONDecodeError:
+        return []
+
+    issues: tp.List[str] = []
+
+    torch_error = info.get("torch_error")
+    if torch_error:
+        issues.append(f"SongFormer runtime probe failed to import torch: {torch_error}")
+
+    numpy_error = info.get("numpy_error")
+    if numpy_error:
+        issues.append(f"SongFormer runtime probe failed to import NumPy: {numpy_error}")
+
+    numpy_version = str(info.get("numpy_version") or "")
+    numpy_major = _parse_major_version(numpy_version)
+    if numpy_major is not None and numpy_major >= 2:
+        issues.append(
+            f"SongFormer environment has NumPy {numpy_version}, "
+            "but SongFormer's jams/msaf stack requires NumPy < 2."
+        )
+
+    cuda_available = info.get("cuda_available")
+    if cuda_available is False:
+        issues.append(
+            "SongFormer environment reports torch.cuda.is_available()=False, "
+            "but SongFormer inference requires CUDA."
+        )
+
+    device_capability = str(info.get("device_capability") or "")
+    arch_list = [str(item) for item in (info.get("arch_list") or []) if item]
+    torch_version = str(info.get("torch_version") or "unknown")
+    if device_capability and arch_list and device_capability not in arch_list:
+        issues.append(
+            f"SongFormer torch {torch_version} does not support GPU capability {device_capability}. "
+            f"Supported capabilities: {', '.join(arch_list)}. "
+            "Upgrade torch in the SongFormer environment."
+        )
+
+    return issues
 
 
 def map_songformer_label(label: str, ignore_silence: bool = True) -> tp.Optional[str]:
