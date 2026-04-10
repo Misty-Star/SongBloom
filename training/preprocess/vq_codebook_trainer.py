@@ -5,6 +5,18 @@ from __future__ import annotations
 import math
 
 import torch
+from tqdm import tqdm
+
+
+def _format_usage_postfix(stats: dict, refill_count: int = 0) -> dict:
+    postfix = {
+        "dead": f"{stats['dead_code_ratio'] * 100:.1f}%",
+        "top1": f"{stats['top_1_usage_share'] * 100:.1f}%",
+        "ppl": f"{stats['perplexity']:.0f}",
+    }
+    if refill_count > 0:
+        postfix["refill"] = refill_count
+    return postfix
 
 
 class StreamingKMeans:
@@ -88,6 +100,7 @@ class StreamingKMeans:
         batch_size: int,
         num_steps: int,
         refresh_every: int = 0,
+        progress_desc: str = "MiniBatch K-Means",
     ) -> "StreamingKMeans":
         if samples.ndim != 2:
             raise ValueError(f"`samples` must be 2D, got {tuple(samples.shape)}")
@@ -99,43 +112,67 @@ class StreamingKMeans:
         working = samples.detach().to(dtype=torch.float32, device="cpu")
         self.initialize(working)
         current_batch_size = min(max(1, int(batch_size)), working.shape[0])
+        total_steps = max(0, int(num_steps))
+        stats_interval = max(1, refresh_every if refresh_every > 0 else max(1, total_steps // 20 or 1))
 
-        for step_index in range(int(num_steps)):
-            indices = torch.randint(
-                low=0,
-                high=working.shape[0],
-                size=(current_batch_size,),
-                generator=self.generator,
-            )
-            batch = working[indices].to(self.centers.device, dtype=torch.float32)
-            self.partial_fit(batch)
+        with tqdm(total=total_steps, desc=progress_desc, unit="step") as progress:
+            for step_index in range(total_steps):
+                indices = torch.randint(
+                    low=0,
+                    high=working.shape[0],
+                    size=(current_batch_size,),
+                    generator=self.generator,
+                )
+                batch = working[indices].to(self.centers.device, dtype=torch.float32)
+                self.partial_fit(batch)
 
-            if refresh_every > 0 and (step_index + 1) % refresh_every == 0:
-                reserve_indices = torch.randperm(working.shape[0], generator=self.generator)[: self.num_codes]
-                reserve = working[reserve_indices].to(self.centers.device, dtype=torch.float32)
-                self.refresh_dead_codes(reserve)
+                refill_count = 0
+                if refresh_every > 0 and (step_index + 1) % refresh_every == 0:
+                    reserve_indices = torch.randperm(working.shape[0], generator=self.generator)[: self.num_codes]
+                    reserve = working[reserve_indices].to(self.centers.device, dtype=torch.float32)
+                    refill_count = self.refresh_dead_codes(reserve)
+
+                if (
+                    step_index == 0
+                    or (step_index + 1) % stats_interval == 0
+                    or step_index + 1 == total_steps
+                    or refill_count > 0
+                ):
+                    progress.set_postfix(_format_usage_postfix(self.usage_stats(), refill_count=refill_count))
+                progress.update(1)
 
         return self
 
-    def refine_full(self, samples: torch.Tensor, batch_size: int) -> torch.Tensor:
+    def refine_full(
+        self,
+        samples: torch.Tensor,
+        batch_size: int,
+        progress_desc: str = "Final refine pass",
+    ) -> torch.Tensor:
         self._ensure_initialized()
         working = samples.detach().to(dtype=torch.float32, device="cpu")
 
         sums = torch.zeros_like(self.centers)
         new_counts = torch.zeros_like(self.counts)
         chunk = min(max(1, int(batch_size)), working.shape[0])
+        total_batches = max(1, math.ceil(working.shape[0] / chunk))
+        processed_frames = 0
 
-        for start in range(0, working.shape[0], chunk):
-            batch = working[start:start + chunk].to(self.centers.device, dtype=torch.float32)
-            assignments = self.assign(batch)
-            unique_ids = assignments.unique()
-            for cluster_id in unique_ids.tolist():
-                mask = assignments == cluster_id
-                points = batch[mask]
-                if points.numel() == 0:
-                    continue
-                sums[cluster_id] += points.sum(dim=0)
-                new_counts[cluster_id] += points.shape[0]
+        with tqdm(total=total_batches, desc=progress_desc, unit="batch") as progress:
+            for start in range(0, working.shape[0], chunk):
+                batch = working[start:start + chunk].to(self.centers.device, dtype=torch.float32)
+                assignments = self.assign(batch)
+                unique_ids = assignments.unique()
+                for cluster_id in unique_ids.tolist():
+                    mask = assignments == cluster_id
+                    points = batch[mask]
+                    if points.numel() == 0:
+                        continue
+                    sums[cluster_id] += points.sum(dim=0)
+                    new_counts[cluster_id] += points.shape[0]
+                processed_frames += batch.shape[0]
+                progress.update(1)
+                progress.set_postfix(frames=f"{processed_frames}/{working.shape[0]}")
 
         empty = new_counts <= 0
         if empty.any():

@@ -4,7 +4,34 @@ import tempfile
 import unittest
 from unittest import mock
 
+from training.preprocess import search_vq_codebook_candidates
 from training.preprocess.search_vq_codebook_candidates import rank_candidates
+
+
+class _FakeProgress:
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+        self.updates = []
+        self.postfixes = []
+        self.closed = False
+
+    def update(self, value=1):
+        self.updates.append(value)
+
+    def set_postfix(self, ordered_dict=None, refresh=True, **kwargs):
+        payload = dict(ordered_dict or {})
+        payload.update(kwargs)
+        self.postfixes.append(payload)
+
+    def close(self):
+        self.closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
 
 
 class SearchVQCodebookCandidatesTest(unittest.TestCase):
@@ -64,6 +91,64 @@ class SearchVQCodebookCandidatesTest(unittest.TestCase):
 
             self.assertEqual(summary["best_candidate"]["seed"], 17)
             self.assertEqual(len(summary["candidates"]), 2)
+
+    def test_main_tracks_candidate_search_progress(self):
+        progress_bars = []
+
+        def fake_tqdm(*args, **kwargs):
+            bar = _FakeProgress(*args, **kwargs)
+            progress_bars.append(bar)
+            return bar
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            argv = [
+                "prog",
+                "--input-jsonl", "/tmp/raw_manifest.jsonl",
+                "--output-dir", temp_dir,
+                "--device", "cpu",
+                "--seeds", "11", "17",
+                "--frame-budgets", "1000",
+            ]
+
+            fake_reports = [
+                {
+                    "codebook_path": os.path.join(temp_dir, "seed11_frames1000.pt"),
+                    "train_metrics": {"dead_code_ratio": 0.01, "top_1_usage_share": 0.02},
+                    "heldout_metrics": {"dead_code_ratio": 0.01, "top_1_usage_share": 0.02, "quantization_mse": 0.3},
+                    "metadata": {"num_train_frames": 1000, "num_heldout_frames": 100},
+                },
+                {
+                    "codebook_path": os.path.join(temp_dir, "seed17_frames1000.pt"),
+                    "train_metrics": {"dead_code_ratio": 0.02, "top_1_usage_share": 0.03},
+                    "heldout_metrics": {"dead_code_ratio": 0.02, "top_1_usage_share": 0.03, "quantization_mse": 0.2},
+                    "metadata": {"num_train_frames": 1000, "num_heldout_frames": 100},
+                },
+            ]
+
+            with mock.patch("sys.argv", argv):
+                from training.preprocess.search_vq_codebook_candidates import main
+
+                with mock.patch.object(
+                    search_vq_codebook_candidates,
+                    "tqdm",
+                    side_effect=fake_tqdm,
+                    create=True,
+                ), mock.patch(
+                    "training.preprocess.search_vq_codebook_candidates.resolve_audio_paths",
+                    return_value=["/tmp/song_a.flac", "/tmp/song_b.flac"],
+                ), mock.patch(
+                    "training.preprocess.search_vq_codebook_candidates.train_codebook",
+                    side_effect=fake_reports,
+                ):
+                    main()
+
+        self.assertEqual(len(progress_bars), 1)
+        progress = progress_bars[0]
+        self.assertEqual(progress.kwargs["total"], 2)
+        self.assertEqual(progress.kwargs["unit"], "candidate")
+        self.assertEqual(progress.updates, [1, 1])
+        self.assertTrue(any(payload.get("seed") == 11 for payload in progress.postfixes))
+        self.assertTrue(any(payload.get("frames") == 1000 for payload in progress.postfixes))
 
 
 if __name__ == "__main__":

@@ -68,7 +68,7 @@ def train_codebook(
         max_total_frames=max_total_train_frames,
         seed=seed,
         muq_chunk_seconds=muq_chunk_seconds,
-        progress_desc="Collecting train MuQ frames",
+        progress_desc="[1/5] Collecting train MuQ frames",
     )
     if train_frames.shape[0] < num_codes:
         raise ValueError(f"Need at least {num_codes} sampled frames, but only got {train_frames.shape[0]}.")
@@ -84,7 +84,7 @@ def train_codebook(
             max_total_frames=max_total_heldout_frames,
             seed=seed + 1,
             muq_chunk_seconds=muq_chunk_seconds,
-            progress_desc="Collecting heldout MuQ frames",
+            progress_desc="[2/5] Collecting heldout MuQ frames",
         )
 
     del muq_model
@@ -102,8 +102,13 @@ def train_codebook(
         batch_size=batch_size,
         num_steps=train_steps,
         refresh_every=refresh_every,
+        progress_desc="[3/5] Streaming K-Means",
     )
-    centers = trainer.refine_full(train_frames, batch_size=batch_size)
+    centers = trainer.refine_full(
+        train_frames,
+        batch_size=batch_size,
+        progress_desc="[4/5] Final refine pass",
+    )
 
     metadata = {
         "scheme": "streaming_kmeans",
@@ -132,12 +137,14 @@ def train_codebook(
         train_frames,
         centers,
         distance_chunk_size=distance_chunk_size,
+        progress_desc="[5/5] Evaluating train split",
     )
     heldout_metrics = (
         evaluate_codebook_frames(
             heldout_frames,
             centers,
             distance_chunk_size=distance_chunk_size,
+            progress_desc="[5/5] Evaluating heldout split",
         )
         if heldout_frames is not None and heldout_frames.numel() > 0
         else {}

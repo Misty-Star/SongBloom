@@ -1,14 +1,44 @@
 import random
+import sys
+import types
 import unittest
+from unittest import mock
 
 import torch
 
 from training.preprocess.vq_codebook_dataset import (
     align_embeddings_to_target_fps,
     build_chunk_spans,
+    collect_embedding_samples,
     sample_frames_from_embedding,
     split_audio_paths,
 )
+
+
+class _FakeProgress:
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+        self.updates = []
+        self.postfixes = []
+        self.closed = False
+
+    def update(self, value=1):
+        self.updates.append(value)
+
+    def set_postfix(self, ordered_dict=None, refresh=True, **kwargs):
+        payload = dict(ordered_dict or {})
+        payload.update(kwargs)
+        self.postfixes.append(payload)
+
+    def close(self):
+        self.closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
 
 
 class VQCodebookDatasetTest(unittest.TestCase):
@@ -58,6 +88,49 @@ class VQCodebookDatasetTest(unittest.TestCase):
                 (48_000 * 20, 48_000 * 45),
             ],
         )
+
+    def test_collect_embedding_samples_tracks_frame_budget_progress(self):
+        progress_bars = []
+
+        def fake_tqdm(*args, **kwargs):
+            bar = _FakeProgress(*args, **kwargs)
+            progress_bars.append(bar)
+            return bar
+
+        fake_torchaudio = types.SimpleNamespace(
+            load=lambda _path: (torch.ones(1, 48_000), 48_000),
+            transforms=types.SimpleNamespace(Resample=lambda _src, _dst: lambda wav: wav),
+        )
+        fake_extract_sketch = types.SimpleNamespace(
+            extract_muq_embeddings=lambda _model, _wav, _sr: torch.arange(6, dtype=torch.float32).view(1, 3, 2),
+        )
+
+        with mock.patch("training.preprocess.vq_codebook_dataset.tqdm", side_effect=fake_tqdm), mock.patch.dict(
+            sys.modules,
+            {
+                "torchaudio": fake_torchaudio,
+                "training.preprocess.extract_sketch": fake_extract_sketch,
+            },
+        ):
+            samples = collect_embedding_samples(
+                audio_paths=["/tmp/song_a.flac", "/tmp/song_b.flac", "/tmp/song_c.flac"],
+                muq_model=object(),
+                sample_rate=48_000,
+                target_fps=3,
+                frames_per_audio=3,
+                max_total_frames=6,
+                seed=0,
+                progress_desc="[1/5] Collecting train MuQ frames",
+            )
+
+        self.assertEqual(tuple(samples.shape), (6, 2))
+        self.assertEqual(len(progress_bars), 1)
+        progress = progress_bars[0]
+        self.assertEqual(progress.kwargs["total"], 6)
+        self.assertEqual(progress.kwargs["unit"], "frame")
+        self.assertEqual(progress.updates, [3, 3])
+        self.assertTrue(any("songs" in payload for payload in progress.postfixes))
+        self.assertTrue(any("audio" in payload for payload in progress.postfixes))
 
 
 if __name__ == "__main__":

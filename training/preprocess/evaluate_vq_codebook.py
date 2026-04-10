@@ -9,6 +9,7 @@ import os
 import typing as tp
 
 import torch
+from tqdm import tqdm
 
 from .vq_codebook_dataset import (
     collect_embedding_samples,
@@ -83,25 +84,42 @@ def evaluate_codebook_frames(
     samples: torch.Tensor,
     codebook: torch.Tensor,
     distance_chunk_size: int = 0,
+    progress_desc: str = "",
 ) -> dict:
     codebook = codebook.float()
-    if distance_chunk_size <= 0:
-        assignments = assign_codebook(samples, codebook)
-        report = summarize_assignments(assignments, num_codes=codebook.shape[0])
-        report["quantization_mse"] = compute_quantization_mse(samples, codebook, assignments=assignments)
-    else:
-        counts = torch.zeros(codebook.shape[0], dtype=torch.float32)
-        squared_error_sum = 0.0
-        total_values = 0
-        for chunk in iter_sample_chunks(samples, distance_chunk_size):
-            chunk = chunk.float()
-            assignments = assign_codebook(chunk, codebook, distance_chunk_size=0)
-            counts += torch.bincount(assignments, minlength=codebook.shape[0]).float()
-            reconstructed = codebook[assignments]
-            squared_error_sum += float(torch.sum((chunk - reconstructed.float()) ** 2).item())
-            total_values += int(chunk.numel())
-        report = summarize_counts(counts)
-        report["quantization_mse"] = squared_error_sum / max(total_values, 1)
+    effective_chunk_size = distance_chunk_size if distance_chunk_size > 0 else max(1, samples.shape[0])
+    total_chunks = max(1, math.ceil(samples.shape[0] / effective_chunk_size))
+    progress = tqdm(total=total_chunks, desc=progress_desc, unit="chunk") if progress_desc else None
+
+    try:
+        if distance_chunk_size <= 0:
+            assignments = assign_codebook(samples, codebook)
+            report = summarize_assignments(assignments, num_codes=codebook.shape[0])
+            report["quantization_mse"] = compute_quantization_mse(samples, codebook, assignments=assignments)
+            if progress is not None:
+                progress.update(1)
+                progress.set_postfix(frames=f"{samples.shape[0]}/{samples.shape[0]}")
+        else:
+            counts = torch.zeros(codebook.shape[0], dtype=torch.float32)
+            squared_error_sum = 0.0
+            total_values = 0
+            processed_frames = 0
+            for chunk in iter_sample_chunks(samples, distance_chunk_size):
+                chunk = chunk.float()
+                assignments = assign_codebook(chunk, codebook, distance_chunk_size=0)
+                counts += torch.bincount(assignments, minlength=codebook.shape[0]).float()
+                reconstructed = codebook[assignments]
+                squared_error_sum += float(torch.sum((chunk - reconstructed.float()) ** 2).item())
+                total_values += int(chunk.numel())
+                processed_frames += chunk.shape[0]
+                if progress is not None:
+                    progress.update(1)
+                    progress.set_postfix(frames=f"{processed_frames}/{samples.shape[0]}")
+            report = summarize_counts(counts)
+            report["quantization_mse"] = squared_error_sum / max(total_values, 1)
+    finally:
+        if progress is not None:
+            progress.close()
     report["num_frames"] = int(samples.shape[0])
     report["embed_dim"] = int(samples.shape[1])
     return report

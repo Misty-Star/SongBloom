@@ -142,6 +142,84 @@ class FitVQCodebookStreamingCLITest(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "No audio files found"):
                         main()
 
+    def test_train_codebook_uses_numbered_stage_descriptions(self):
+        fake_train_frames = torch.tensor(
+            [
+                [0.0, 0.0],
+                [0.1, 0.0],
+                [10.0, 10.0],
+                [10.1, 10.0],
+            ],
+            dtype=torch.float32,
+        )
+        fake_heldout_frames = fake_train_frames[:2]
+        trainer = mock.Mock()
+        trainer.refine_full.return_value = torch.tensor(
+            [[0.0, 0.0], [10.0, 10.0]],
+            dtype=torch.float32,
+        )
+
+        from training.preprocess.fit_vq_codebook_streaming import train_codebook
+
+        with mock.patch(
+            "training.preprocess.fit_vq_codebook_streaming.load_muq_model",
+            return_value=mock.Mock(),
+        ), mock.patch(
+            "training.preprocess.fit_vq_codebook_streaming.collect_embedding_samples",
+            side_effect=[fake_train_frames, fake_heldout_frames],
+        ) as collect_mock, mock.patch(
+            "training.preprocess.fit_vq_codebook_streaming.StreamingKMeans",
+            return_value=trainer,
+        ), mock.patch(
+            "training.preprocess.fit_vq_codebook_streaming.evaluate_codebook_frames",
+            side_effect=[
+                {"dead_code_ratio": 0.01, "top_1_usage_share": 0.02, "quantization_mse": 0.3},
+                {"dead_code_ratio": 0.01, "top_1_usage_share": 0.02, "quantization_mse": 0.4},
+            ],
+        ) as evaluate_mock, mock.patch(
+            "training.preprocess.fit_vq_codebook_streaming.save_codebook",
+        ), mock.patch(
+            "training.preprocess.fit_vq_codebook_streaming.save_report",
+        ):
+            train_codebook(
+                audio_paths=["/tmp/song_0.flac", "/tmp/song_1.flac", "/tmp/song_2.flac", "/tmp/song_3.flac"],
+                output_path="/tmp/vq_codebook.pt",
+                muq_model_name="fake-muq",
+                device="cpu",
+                sample_rate=48_000,
+                target_fps=25,
+                frames_per_audio=2,
+                max_total_train_frames=4,
+                max_total_heldout_frames=2,
+                num_codes=2,
+                heldout_ratio=0.25,
+                batch_size=2,
+                train_steps=3,
+                refresh_every=1,
+                seed=7,
+                muq_chunk_seconds=0.0,
+                distance_chunk_size=2,
+            )
+
+        collect_descs = [call.kwargs["progress_desc"] for call in collect_mock.call_args_list]
+        self.assertEqual(
+            collect_descs,
+            [
+                "[1/5] Collecting train MuQ frames",
+                "[2/5] Collecting heldout MuQ frames",
+            ],
+        )
+        self.assertEqual(trainer.fit.call_args.kwargs["progress_desc"], "[3/5] Streaming K-Means")
+        self.assertEqual(trainer.refine_full.call_args.kwargs["progress_desc"], "[4/5] Final refine pass")
+        evaluate_descs = [call.kwargs["progress_desc"] for call in evaluate_mock.call_args_list]
+        self.assertEqual(
+            evaluate_descs,
+            [
+                "[5/5] Evaluating train split",
+                "[5/5] Evaluating heldout split",
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

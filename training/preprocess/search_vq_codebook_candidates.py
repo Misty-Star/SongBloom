@@ -6,6 +6,8 @@ import argparse
 import json
 import os
 
+from tqdm import tqdm
+
 from .fit_vq_codebook_streaming import train_codebook
 from .vq_codebook_dataset import resolve_audio_paths
 
@@ -65,46 +67,50 @@ def main() -> None:
         raise RuntimeError("No audio files found for VQ codebook candidate search.")
 
     candidates: list[dict] = []
-    for seed in args.seeds:
-        for frame_budget in args.frame_budgets:
-            candidate_name = f"seed{seed}_frames{frame_budget}"
-            output_path = os.path.join(args.output_dir, f"{candidate_name}.pt")
-            report = train_codebook(
-                audio_paths=audio_paths,
-                output_path=output_path,
-                muq_model_name=args.muq_model,
-                device=args.device,
-                sample_rate=args.sample_rate,
-                target_fps=args.target_fps,
-                frames_per_audio=args.frames_per_audio,
-                max_total_train_frames=frame_budget,
-                max_total_heldout_frames=max(1, frame_budget // 4),
-                num_codes=args.num_codes,
-                heldout_ratio=args.heldout_ratio,
-                batch_size=args.batch_size,
-                train_steps=args.train_steps,
-                refresh_every=args.refresh_every,
-                seed=seed,
-                muq_chunk_seconds=args.muq_chunk_seconds,
-                distance_chunk_size=args.distance_chunk_size,
-            )
+    total_candidates = len(args.seeds) * len(args.frame_budgets)
+    with tqdm(total=total_candidates, desc="Searching VQ candidates", unit="candidate") as progress:
+        for seed in args.seeds:
+            for frame_budget in args.frame_budgets:
+                progress.set_postfix(seed=seed, frames=frame_budget)
+                candidate_name = f"seed{seed}_frames{frame_budget}"
+                output_path = os.path.join(args.output_dir, f"{candidate_name}.pt")
+                report = train_codebook(
+                    audio_paths=audio_paths,
+                    output_path=output_path,
+                    muq_model_name=args.muq_model,
+                    device=args.device,
+                    sample_rate=args.sample_rate,
+                    target_fps=args.target_fps,
+                    frames_per_audio=args.frames_per_audio,
+                    max_total_train_frames=frame_budget,
+                    max_total_heldout_frames=max(1, frame_budget // 4),
+                    num_codes=args.num_codes,
+                    heldout_ratio=args.heldout_ratio,
+                    batch_size=args.batch_size,
+                    train_steps=args.train_steps,
+                    refresh_every=args.refresh_every,
+                    seed=seed,
+                    muq_chunk_seconds=args.muq_chunk_seconds,
+                    distance_chunk_size=args.distance_chunk_size,
+                )
 
-            heldout_metrics = report.get("heldout_metrics") or report.get("train_metrics") or {}
-            metadata = report.get("metadata", {})
-            candidates.append(
-                {
-                    "name": candidate_name,
-                    "seed": seed,
-                    "frame_budget": frame_budget,
-                    "codebook_path": report["codebook_path"],
-                    "dead_code_ratio": heldout_metrics["dead_code_ratio"],
-                    "top_1_usage_share": heldout_metrics["top_1_usage_share"],
-                    "usage_entropy": heldout_metrics.get("usage_entropy", 0.0),
-                    "quantization_mse": heldout_metrics["quantization_mse"],
-                    "num_train_frames": metadata.get("num_train_frames", 0),
-                    "num_heldout_frames": metadata.get("num_heldout_frames", 0),
-                }
-            )
+                heldout_metrics = report.get("heldout_metrics") or report.get("train_metrics") or {}
+                metadata = report.get("metadata", {})
+                candidates.append(
+                    {
+                        "name": candidate_name,
+                        "seed": seed,
+                        "frame_budget": frame_budget,
+                        "codebook_path": report["codebook_path"],
+                        "dead_code_ratio": heldout_metrics["dead_code_ratio"],
+                        "top_1_usage_share": heldout_metrics["top_1_usage_share"],
+                        "usage_entropy": heldout_metrics.get("usage_entropy", 0.0),
+                        "quantization_mse": heldout_metrics["quantization_mse"],
+                        "num_train_frames": metadata.get("num_train_frames", 0),
+                        "num_heldout_frames": metadata.get("num_heldout_frames", 0),
+                    }
+                )
+                progress.update(1)
 
     ranked = rank_candidates(
         candidates,
