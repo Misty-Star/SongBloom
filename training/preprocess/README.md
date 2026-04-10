@@ -215,6 +215,7 @@ python -m training.preprocess.build_dataset \
 - 如果直接传原始 manifest 且缺 `structure_json`，当前实现会在逐样本处理前先批量预取结构结果
 - 但如果还缺 `vocals_path` / `no_vocals_path` 或 `whisperx_json`，这些阶段仍会落回样本循环，所以最佳吞吐依然是先跑 `prepare_assets`
 - `build_dataset` 当前会复用同一份标准化 waveform 生成 `prompt_wav.flac`、`x_latent.pt`、`x_sketch.pt`，避免对同一首歌重复读盘和重复重采样
+- `prompt_wav.flac` 默认优先从首个副歌起点开始截取最多 10 秒；若副歌接近结尾则只保留可用尾段，若无副歌则回退到旧的 vocal / 能量启发式
 
 其中歌词清洗阶段会优先过滤常见的：
 
