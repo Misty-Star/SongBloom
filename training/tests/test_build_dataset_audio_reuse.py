@@ -19,6 +19,47 @@ def import_build_dataset_with_mocked_torchaudio():
 
 
 class BuildDatasetAudioReuseTest(unittest.TestCase):
+    def test_save_prompt_audio_extracts_ten_seconds_from_first_chorus_start(self):
+        build_dataset = import_build_dataset_with_mocked_torchaudio()
+        build_dataset.torchaudio.save = mock.Mock()
+
+        wav = torch.arange(0, 120, dtype=torch.float32).unsqueeze(0)
+        build_dataset.save_prompt_audio(
+            audio_path="/tmp/full_audio.flac",
+            output_path="/tmp/prompt_wav.flac",
+            sample_rate=1,
+            prompt_len=10.0,
+            structure_segments=[
+                {"label": "[verse]", "start": 0.0, "end": 50.0},
+                {"label": "[chorus]", "start": 60.0, "end": 90.0},
+            ],
+            wav=wav,
+            wav_sample_rate=1,
+        )
+
+        saved_wav, saved_sr = build_dataset.torchaudio.save.call_args.args[1:]
+        self.assertTrue(torch.equal(saved_wav, wav[:, 60:70]))
+        self.assertEqual(saved_sr, 1)
+
+    def test_save_prompt_audio_uses_available_suffix_when_chorus_is_near_end(self):
+        build_dataset = import_build_dataset_with_mocked_torchaudio()
+        build_dataset.torchaudio.save = mock.Mock()
+
+        wav = torch.arange(0, 20, dtype=torch.float32).unsqueeze(0)
+        build_dataset.save_prompt_audio(
+            audio_path="/tmp/full_audio.flac",
+            output_path="/tmp/prompt_wav.flac",
+            sample_rate=1,
+            prompt_len=10.0,
+            structure_segments=[{"label": "[chorus]", "start": 15.0, "end": 19.0}],
+            wav=wav,
+            wav_sample_rate=1,
+        )
+
+        saved_wav, saved_sr = build_dataset.torchaudio.save.call_args.args[1:]
+        self.assertTrue(torch.equal(saved_wav, wav[:, 15:20]))
+        self.assertEqual(saved_sr, 1)
+
     def test_save_prompt_audio_uses_preloaded_waveform_without_loading_from_disk(self):
         build_dataset = import_build_dataset_with_mocked_torchaudio()
         build_dataset.torchaudio.load.side_effect = AssertionError("should not load audio again")

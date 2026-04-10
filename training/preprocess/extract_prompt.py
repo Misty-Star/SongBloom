@@ -25,6 +25,15 @@ def _load_structure_map(path: tp.Optional[str]) -> tp.Dict[str, tp.List[dict]]:
     raise ValueError("structure-json must be a JSON object keyed by sample id.")
 
 
+def _normalize_structure_label(label: tp.Any) -> str:
+    normalized = str(label or "").strip().lower()
+    if not normalized:
+        return ""
+    if normalized.startswith("[") and normalized.endswith("]"):
+        return normalized
+    return f"[{normalized}]"
+
+
 def choose_prompt_window(
     wav,
     sample_rate: int,
@@ -37,10 +46,21 @@ def choose_prompt_window(
         return 0, total_samples
 
     structure_segments = list(structure_segments or [])
+    chorus_segments = [
+        segment
+        for segment in structure_segments
+        if _normalize_structure_label(segment.get("label")) == "[chorus]"
+    ]
+    if chorus_segments:
+        chorus_start = max(float(chorus_segments[0].get("start", 0.0)), 0.0)
+        chorus_start_sample = min(int(chorus_start * sample_rate), total_samples)
+        if chorus_start_sample < total_samples:
+            return chorus_start_sample, min(chorus_start_sample + prompt_samples, total_samples)
+
     vocal_segments = [
         segment
         for segment in structure_segments
-        if segment["label"] in {"[verse]", "[chorus]", "[bridge]"}
+        if _normalize_structure_label(segment.get("label")) in {"[verse]", "[chorus]", "[bridge]"}
     ]
     candidate_start = 0
     if vocal_segments:
