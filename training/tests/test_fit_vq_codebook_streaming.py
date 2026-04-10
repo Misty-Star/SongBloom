@@ -8,6 +8,36 @@ import torch
 
 
 class FitVQCodebookStreamingCLITest(unittest.TestCase):
+    def test_main_forwards_memory_control_arguments(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, "vq_codebook.pt")
+            argv = [
+                "prog",
+                "--input-jsonl", "/tmp/raw_manifest.jsonl",
+                "--output-path", output_path,
+                "--device", "cpu",
+                "--num-codes", "4",
+                "--muq-chunk-seconds", "8",
+                "--distance-chunk-size", "16",
+            ]
+
+            with mock.patch("sys.argv", argv):
+                from training.preprocess.fit_vq_codebook_streaming import main
+
+                with mock.patch(
+                    "training.preprocess.fit_vq_codebook_streaming.resolve_audio_paths",
+                    return_value=[f"/tmp/song_{index}.flac" for index in range(6)],
+                ), mock.patch(
+                    "training.preprocess.fit_vq_codebook_streaming.train_codebook",
+                    return_value={"codebook_path": output_path},
+                ) as train_codebook_mock:
+                    main()
+
+            train_codebook_mock.assert_called_once()
+            call_kwargs = train_codebook_mock.call_args.kwargs
+            self.assertEqual(call_kwargs["muq_chunk_seconds"], 8.0)
+            self.assertEqual(call_kwargs["distance_chunk_size"], 16)
+
     def test_main_writes_codebook_and_metadata(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             output_path = os.path.join(temp_dir, "vq_codebook.pt")

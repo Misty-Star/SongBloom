@@ -42,6 +42,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--train-steps", type=int, default=4000)
     parser.add_argument("--refresh-every", type=int, default=200)
+    parser.add_argument("--muq-chunk-seconds", type=float, default=20.0)
+    parser.add_argument("--distance-chunk-size", type=int, default=2048)
     parser.add_argument("--max-dead-code-ratio", type=float, default=0.05)
     parser.add_argument("--max-top1-share", type=float, default=0.05)
     parser.add_argument("--seeds", type=int, nargs="+", required=True)
@@ -83,6 +85,8 @@ def main() -> None:
                 train_steps=args.train_steps,
                 refresh_every=args.refresh_every,
                 seed=seed,
+                muq_chunk_seconds=args.muq_chunk_seconds,
+                distance_chunk_size=args.distance_chunk_size,
             )
 
             heldout_metrics = report.get("heldout_metrics") or report.get("train_metrics") or {}

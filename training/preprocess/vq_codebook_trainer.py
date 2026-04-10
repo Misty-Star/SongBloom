@@ -27,18 +27,19 @@ class StreamingKMeans:
                 f"Need at least {self.num_codes} init samples, but only got {init_samples.shape[0]}."
             )
 
-        working = init_samples.to(dtype=torch.float32, device=self.device)
-        if working.shape[1] != self.embed_dim:
+        init_samples = init_samples.detach().to(dtype=torch.float32, device="cpu")
+        if init_samples.shape[1] != self.embed_dim:
             raise ValueError(
-                f"Expected embedding dim {self.embed_dim}, got {working.shape[1]}."
+                f"Expected embedding dim {self.embed_dim}, got {init_samples.shape[1]}."
             )
 
-        if working.shape[0] == self.num_codes:
-            self.centers = working.clone()
+        if init_samples.shape[0] == self.num_codes:
+            centers = init_samples
         else:
-            indices = torch.randperm(working.shape[0], generator=self.generator)[: self.num_codes]
-            self.centers = working[indices.to(working.device)].clone()
-        self.counts = torch.zeros(self.num_codes, device=working.device, dtype=torch.float32)
+            indices = torch.randperm(init_samples.shape[0], generator=self.generator)[: self.num_codes]
+            centers = init_samples[indices]
+        self.centers = centers.to(dtype=torch.float32, device=self.device).clone()
+        self.counts = torch.zeros(self.num_codes, device=self.centers.device, dtype=torch.float32)
 
     def _ensure_initialized(self) -> None:
         if self.centers is None or self.counts is None:
@@ -95,8 +96,8 @@ class StreamingKMeans:
                 f"Need at least {self.num_codes} sampled frames, but only got {samples.shape[0]}."
             )
 
-        self.initialize(samples)
-        working = samples.to(self.centers.device, dtype=torch.float32)
+        working = samples.detach().to(dtype=torch.float32, device="cpu")
+        self.initialize(working)
         current_batch_size = min(max(1, int(batch_size)), working.shape[0])
 
         for step_index in range(int(num_steps)):
@@ -106,25 +107,26 @@ class StreamingKMeans:
                 size=(current_batch_size,),
                 generator=self.generator,
             )
-            batch = working[indices.to(working.device)]
+            batch = working[indices].to(self.centers.device, dtype=torch.float32)
             self.partial_fit(batch)
 
             if refresh_every > 0 and (step_index + 1) % refresh_every == 0:
-                reserve = working[torch.randperm(working.shape[0], device=working.device)[: self.num_codes]]
+                reserve_indices = torch.randperm(working.shape[0], generator=self.generator)[: self.num_codes]
+                reserve = working[reserve_indices].to(self.centers.device, dtype=torch.float32)
                 self.refresh_dead_codes(reserve)
 
         return self
 
     def refine_full(self, samples: torch.Tensor, batch_size: int) -> torch.Tensor:
         self._ensure_initialized()
-        working = samples.to(self.centers.device, dtype=torch.float32)
+        working = samples.detach().to(dtype=torch.float32, device="cpu")
 
         sums = torch.zeros_like(self.centers)
         new_counts = torch.zeros_like(self.counts)
         chunk = min(max(1, int(batch_size)), working.shape[0])
 
         for start in range(0, working.shape[0], chunk):
-            batch = working[start:start + chunk]
+            batch = working[start:start + chunk].to(self.centers.device, dtype=torch.float32)
             assignments = self.assign(batch)
             unique_ids = assignments.unique()
             for cluster_id in unique_ids.tolist():
@@ -137,8 +139,9 @@ class StreamingKMeans:
 
         empty = new_counts <= 0
         if empty.any():
-            refill_ids = torch.randperm(working.shape[0], device=working.device)[: int(empty.sum().item())]
-            sums[empty] = working[refill_ids]
+            refill_ids = torch.randperm(working.shape[0], generator=self.generator)[: int(empty.sum().item())]
+            refill = working[refill_ids].to(self.centers.device, dtype=torch.float32)
+            sums[empty] = refill
             new_counts[empty] = 1.0
 
         self.centers = sums / new_counts.unsqueeze(-1)
@@ -147,10 +150,17 @@ class StreamingKMeans:
 
     def quantization_mse(self, samples: torch.Tensor) -> float:
         self._ensure_initialized()
-        working = samples.to(self.centers.device, dtype=torch.float32)
-        assignments = self.assign(working)
-        reconstructed = self.centers[assignments]
-        return float(torch.mean((working - reconstructed) ** 2).item())
+        working = samples.detach().to(dtype=torch.float32, device="cpu")
+        chunk = min(max(1, 4096), working.shape[0])
+        squared_error_sum = 0.0
+        total_values = 0
+        for start in range(0, working.shape[0], chunk):
+            batch = working[start:start + chunk].to(self.centers.device, dtype=torch.float32)
+            assignments = self.assign(batch)
+            reconstructed = self.centers[assignments]
+            squared_error_sum += float(torch.sum((batch - reconstructed) ** 2).item())
+            total_values += int(batch.numel())
+        return squared_error_sum / max(total_values, 1)
 
     def usage_stats(self) -> dict:
         self._ensure_initialized()

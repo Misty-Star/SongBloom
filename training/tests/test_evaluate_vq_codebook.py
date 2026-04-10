@@ -6,7 +6,10 @@ from unittest import mock
 
 import torch
 
-from training.preprocess.evaluate_vq_codebook import summarize_assignments
+from training.preprocess.evaluate_vq_codebook import (
+    evaluate_codebook_frames,
+    summarize_assignments,
+)
 
 
 class EvaluateVQCodebookTest(unittest.TestCase):
@@ -18,6 +21,36 @@ class EvaluateVQCodebookTest(unittest.TestCase):
         self.assertAlmostEqual(summary["dead_code_ratio"], 0.25)
         self.assertIn("usage_entropy", summary)
         self.assertIn("top_1_usage_share", summary)
+
+    def test_evaluate_codebook_frames_matches_chunked_distance_path(self):
+        samples = torch.tensor(
+            [
+                [0.0, 0.0],
+                [0.2, 0.1],
+                [1.0, 1.0],
+                [1.2, 1.1],
+                [2.0, 2.0],
+                [2.2, 2.1],
+            ],
+            dtype=torch.float32,
+        )
+        codebook = torch.tensor(
+            [
+                [0.0, 0.0],
+                [1.0, 1.0],
+                [2.0, 2.0],
+                [9.0, 9.0],
+            ],
+            dtype=torch.float32,
+        )
+
+        full = evaluate_codebook_frames(samples, codebook)
+        chunked = evaluate_codebook_frames(samples, codebook, distance_chunk_size=2)
+
+        self.assertAlmostEqual(chunked["quantization_mse"], full["quantization_mse"])
+        self.assertAlmostEqual(chunked["dead_code_ratio"], full["dead_code_ratio"])
+        self.assertAlmostEqual(chunked["top_1_usage_share"], full["top_1_usage_share"])
+        self.assertAlmostEqual(chunked["usage_entropy"], full["usage_entropy"])
 
     def test_main_writes_evaluation_report(self):
         with tempfile.TemporaryDirectory() as temp_dir:

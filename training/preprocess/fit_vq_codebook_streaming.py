@@ -50,6 +50,8 @@ def train_codebook(
     train_steps: int,
     refresh_every: int,
     seed: int,
+    muq_chunk_seconds: float,
+    distance_chunk_size: int,
 ) -> dict:
     if not audio_paths:
         raise RuntimeError("No audio files found for streaming VQ codebook fitting.")
@@ -65,6 +67,7 @@ def train_codebook(
         frames_per_audio=frames_per_audio,
         max_total_frames=max_total_train_frames,
         seed=seed,
+        muq_chunk_seconds=muq_chunk_seconds,
         progress_desc="Collecting train MuQ frames",
     )
     if train_frames.shape[0] < num_codes:
@@ -80,8 +83,13 @@ def train_codebook(
             frames_per_audio=frames_per_audio,
             max_total_frames=max_total_heldout_frames,
             seed=seed + 1,
+            muq_chunk_seconds=muq_chunk_seconds,
             progress_desc="Collecting heldout MuQ frames",
         )
+
+    del muq_model
+    if device.startswith("cuda"):
+        torch.cuda.empty_cache()
 
     trainer = StreamingKMeans(
         num_codes=num_codes,
@@ -120,9 +128,17 @@ def train_codebook(
     }
     save_codebook(output_path, centers=centers, metadata=metadata)
 
-    train_metrics = evaluate_codebook_frames(train_frames, centers)
+    train_metrics = evaluate_codebook_frames(
+        train_frames,
+        centers,
+        distance_chunk_size=distance_chunk_size,
+    )
     heldout_metrics = (
-        evaluate_codebook_frames(heldout_frames, centers)
+        evaluate_codebook_frames(
+            heldout_frames,
+            centers,
+            distance_chunk_size=distance_chunk_size,
+        )
         if heldout_frames is not None and heldout_frames.numel() > 0
         else {}
     )
@@ -157,6 +173,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--train-steps", type=int, default=4000)
     parser.add_argument("--refresh-every", type=int, default=200)
+    parser.add_argument("--muq-chunk-seconds", type=float, default=20.0)
+    parser.add_argument("--distance-chunk-size", type=int, default=2048)
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
@@ -185,6 +203,8 @@ def main() -> None:
         train_steps=args.train_steps,
         refresh_every=args.refresh_every,
         seed=args.seed,
+        muq_chunk_seconds=args.muq_chunk_seconds,
+        distance_chunk_size=args.distance_chunk_size,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2))
 

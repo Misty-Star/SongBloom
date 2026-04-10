@@ -5,6 +5,7 @@ import torch
 
 from training.preprocess.vq_codebook_dataset import (
     align_embeddings_to_target_fps,
+    build_chunk_spans,
     sample_frames_from_embedding,
     split_audio_paths,
 )
@@ -42,6 +43,21 @@ class VQCodebookDatasetTest(unittest.TestCase):
         )
 
         self.assertEqual(tuple(aligned.shape), (1, 8, 4))
+
+    def test_build_chunk_spans_merges_short_tail_into_previous_chunk(self):
+        spans = build_chunk_spans(
+            total_num_samples=48_000 * 45,
+            chunk_num_samples=48_000 * 20,
+            min_chunk_num_samples=48_000 * 10,
+        )
+
+        self.assertEqual(
+            spans,
+            [
+                (0, 48_000 * 20),
+                (48_000 * 20, 48_000 * 45),
+            ],
+        )
 
 
 if __name__ == "__main__":
