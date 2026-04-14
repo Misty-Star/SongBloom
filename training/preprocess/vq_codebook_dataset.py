@@ -8,12 +8,18 @@ import random
 import typing as tp
 
 import torch
-import torch.nn.functional as F
 from tqdm import tqdm
+
+from .muq_feature_cache import (
+    DEFAULT_MUQ_MIN_CHUNK_SECONDS,
+    align_embeddings_to_target_fps,
+    build_chunk_spans,
+    get_or_compute_muq_embedding,
+)
 
 
 AUDIO_EXTENSIONS = (".wav", ".flac", ".mp3", ".m4a", ".ogg")
-DEFAULT_MUQ_MIN_CHUNK_SECONDS = 10.0
+
 
 
 def _short_audio_label(audio_path: str, limit: int = 32) -> str:
@@ -21,6 +27,7 @@ def _short_audio_label(audio_path: str, limit: int = 32) -> str:
     if len(label) <= limit:
         return label
     return "..." + label[-(limit - 3):]
+
 
 
 def load_manifest_audio_paths(path: str) -> list[str]:
@@ -36,6 +43,7 @@ def load_manifest_audio_paths(path: str) -> list[str]:
     return audio_paths
 
 
+
 def list_audio_files(audio_dir: str, recursive: bool = True) -> list[str]:
     results: list[str] = []
     for root, _dirs, files in os.walk(audio_dir):
@@ -45,6 +53,7 @@ def list_audio_files(audio_dir: str, recursive: bool = True) -> list[str]:
         if not recursive:
             break
     return sorted(results)
+
 
 
 def split_audio_paths(
@@ -70,6 +79,7 @@ def split_audio_paths(
     return train, heldout
 
 
+
 def sample_frames_from_embedding(
     embedding: torch.Tensor,
     max_frames: int,
@@ -83,42 +93,6 @@ def sample_frames_from_embedding(
     return frames[indices].float()
 
 
-def align_embeddings_to_target_fps(
-    embedding: torch.Tensor,
-    audio_num_samples: int,
-    sample_rate: int,
-    target_fps: int,
-) -> torch.Tensor:
-    target_frames = int(audio_num_samples / sample_rate * target_fps)
-    if target_frames <= 0 or embedding.shape[1] == target_frames:
-        return embedding
-    return F.interpolate(
-        embedding.transpose(1, 2),
-        size=target_frames,
-        mode="nearest",
-    ).transpose(1, 2)
-
-
-def build_chunk_spans(
-    total_num_samples: int,
-    chunk_num_samples: int,
-    min_chunk_num_samples: int,
-) -> list[tuple[int, int]]:
-    if total_num_samples <= 0:
-        return []
-    if chunk_num_samples <= 0 or total_num_samples <= chunk_num_samples:
-        return [(0, total_num_samples)]
-
-    spans: list[tuple[int, int]] = []
-    for start in range(0, total_num_samples, chunk_num_samples):
-        end = min(start + chunk_num_samples, total_num_samples)
-        if spans and end == total_num_samples and (end - start) < min_chunk_num_samples:
-            prev_start, _prev_end = spans[-1]
-            spans[-1] = (prev_start, end)
-        else:
-            spans.append((start, end))
-    return spans
-
 
 def collect_embedding_samples(
     audio_paths: tp.Sequence[str],
@@ -128,70 +102,48 @@ def collect_embedding_samples(
     frames_per_audio: int,
     max_total_frames: int,
     seed: int,
+    muq_model_name: str = "",
+    cache_dir: str = "",
     muq_chunk_seconds: float = 0.0,
     progress_desc: str = "Collecting MuQ frames",
 ) -> torch.Tensor:
-    import torchaudio
-
-    from .extract_sketch import extract_muq_embeddings
-
     rng = random.Random(seed)
     collected: list[torch.Tensor] = []
     total_frames = 0
     songs_used = 0
-    min_chunk_num_samples = max(1, int(DEFAULT_MUQ_MIN_CHUNK_SECONDS * sample_rate))
-    chunk_num_samples = max(0, int(float(muq_chunk_seconds) * sample_rate))
-    if chunk_num_samples > 0:
-        chunk_num_samples = max(chunk_num_samples, min_chunk_num_samples)
+    use_full_ceiling = max_total_frames <= 0
+    frame_budget_label = "full" if use_full_ceiling else str(max_total_frames)
 
-    with tqdm(total=max_total_frames, desc=progress_desc, unit="frame") as progress:
+    with tqdm(total=None if use_full_ceiling else max_total_frames, desc=progress_desc, unit="frame") as progress:
         for audio_path in audio_paths:
             audio_label = _short_audio_label(audio_path)
             progress.set_postfix(songs=songs_used, audio=audio_label)
 
-            wav, sr = torchaudio.load(audio_path)
-            if sr != sample_rate:
-                wav = torchaudio.transforms.Resample(sr, sample_rate)(wav)
-
-            if chunk_num_samples > 0 and wav.shape[-1] > chunk_num_samples:
-                spans = build_chunk_spans(
-                    total_num_samples=wav.shape[-1],
-                    chunk_num_samples=chunk_num_samples,
-                    min_chunk_num_samples=min_chunk_num_samples,
-                )
-                embedding_chunks: list[torch.Tensor] = []
-                total_chunks = len(spans)
-                for chunk_index, (start, end) in enumerate(spans, start=1):
-                    progress.set_postfix(
-                        songs=songs_used,
-                        audio=audio_label,
-                        chunk=f"{chunk_index}/{total_chunks}",
-                    )
-                    chunk = wav[:, start:end]
-                    if chunk.shape[-1] == 0:
-                        continue
-                    embedding_chunks.append(extract_muq_embeddings(muq_model, chunk, sample_rate).cpu())
-                if not embedding_chunks:
-                    continue
-                embedding = torch.cat(embedding_chunks, dim=1)
-            else:
-                embedding = extract_muq_embeddings(muq_model, wav, sample_rate).cpu()
-            embedding = align_embeddings_to_target_fps(
-                embedding=embedding,
-                audio_num_samples=wav.shape[-1],
+            embedding = get_or_compute_muq_embedding(
+                audio_path=audio_path,
+                muq_model=muq_model,
+                muq_model_name=muq_model_name or type(muq_model).__name__,
                 sample_rate=sample_rate,
                 target_fps=target_fps,
+                cache_dir=cache_dir,
+                muq_chunk_seconds=muq_chunk_seconds,
+                progress_postfix=lambda payload, audio_label=audio_label, songs_used=songs_used: progress.set_postfix(
+                    songs=songs_used,
+                    audio=audio_label,
+                    **payload,
+                ),
             )
 
             sampled = sample_frames_from_embedding(embedding, frames_per_audio, rng)
             if sampled.numel() == 0:
                 continue
 
-            remaining = max_total_frames - total_frames
-            if remaining <= 0:
-                break
-            if sampled.shape[0] > remaining:
-                sampled = sampled[:remaining]
+            if not use_full_ceiling:
+                remaining = max_total_frames - total_frames
+                if remaining <= 0:
+                    break
+                if sampled.shape[0] > remaining:
+                    sampled = sampled[:remaining]
 
             collected.append(sampled)
             songs_used += 1
@@ -200,15 +152,16 @@ def collect_embedding_samples(
             progress.set_postfix(
                 songs=songs_used,
                 audio=audio_label,
-                frames=f"{total_frames}/{max_total_frames}",
+                frames=f"{total_frames}/{frame_budget_label}",
             )
 
-            if total_frames >= max_total_frames:
+            if not use_full_ceiling and total_frames >= max_total_frames:
                 break
 
     if not collected:
         raise RuntimeError("No MuQ embedding frames collected; check audio input and MuQ setup.")
     return torch.cat(collected, dim=0)
+
 
 
 def resolve_audio_paths(

@@ -39,6 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--muq-model", type=str, default="OpenMuQ/MuQ-large-msd-iter")
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--frames-per-audio", type=int, default=512)
+    parser.add_argument("--muq-cache-dir", type=str, default="", help="可选，每首歌 MuQ embedding 的共享缓存目录")
     parser.add_argument("--heldout-ratio", type=float, default=0.1)
     parser.add_argument("--num-codes", type=int, default=16384)
     parser.add_argument("--batch-size", type=int, default=1024)
@@ -90,6 +91,7 @@ def main() -> None:
                     train_steps=args.train_steps,
                     refresh_every=args.refresh_every,
                     seed=seed,
+                    muq_cache_dir=args.muq_cache_dir,
                     muq_chunk_seconds=args.muq_chunk_seconds,
                     distance_chunk_size=args.distance_chunk_size,
                 )

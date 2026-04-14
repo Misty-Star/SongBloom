@@ -75,6 +75,7 @@ python -m training.preprocess.fit_vq_codebook_streaming \
   --input-jsonl /path/to/raw_manifest.jsonl \
   --output-path /path/to/vq_codebook_streaming.pt \
   --device cuda:0 \
+  --muq-cache-dir /path/to/muq_cache \
   --max-total-train-frames 200000 \
   --max-total-heldout-frames 50000
 
@@ -83,7 +84,8 @@ python -m training.preprocess.evaluate_vq_codebook \
   --input-jsonl /path/to/raw_manifest.jsonl \
   --codebook-path /path/to/vq_codebook_streaming.pt \
   --report-path /path/to/vq_codebook_streaming.evaluation.report.json \
-  --device cuda:0
+  --device cuda:0 \
+  --muq-cache-dir /path/to/muq_cache
 
 # 3) 按多 seed / 多 frame budget 批量搜索候选
 python -m training.preprocess.search_vq_codebook_candidates \
@@ -91,8 +93,13 @@ python -m training.preprocess.search_vq_codebook_candidates \
   --output-dir /path/to/vq_candidates \
   --seeds 11 17 29 \
   --frame-budgets 200000 400000 \
-  --device cuda:0
+  --device cuda:0 \
+  --muq-cache-dir /path/to/muq_cache
 ```
+
+其中 `--max-total-train-frames 0` 和 `--max-total-heldout-frames 0` 都表示对应 split 使用 full ceiling，不再按 frame budget 提前截断。
+
+`fit_vq_codebook_streaming.py`、`evaluate_vq_codebook.py`、`search_vq_codebook_candidates.py` 与 `build_dataset.py` 现在都支持共享 `--muq-cache-dir`。同一首歌命中缓存后会直接复用已对齐到 `target_fps` 的 MuQ embedding，只在 cache miss 时重新计算。
 
 这条“效果优先”工作流的设计目标是：
 
@@ -186,7 +193,8 @@ python -m training.preprocess.run_preprocess_pipeline \
 python -m training.preprocess.build_dataset \
   --input-jsonl /path/to/ready_manifest.jsonl \
   --output-dir /path/to/processed_dataset \
-  --vq-ckpt /path/to/vq_codebook.pt
+  --vq-ckpt /path/to/vq_codebook.pt \
+  --muq-cache-dir /path/to/muq_cache
 ```
 
 如果 `SongFormer` 需要在单独的 `conda` 环境 `songformer` 中运行，推荐显式传入：

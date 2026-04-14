@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import tempfile
@@ -8,6 +9,20 @@ import torch
 
 
 class FitVQCodebookStreamingCLITest(unittest.TestCase):
+    def test_parse_args_help_describes_zero_as_full_ceiling(self):
+        stdout = io.StringIO()
+        with mock.patch("sys.argv", ["prog", "--help"]), mock.patch("sys.stdout", stdout):
+            from training.preprocess.fit_vq_codebook_streaming import parse_args
+
+            with self.assertRaises(SystemExit) as exit_context:
+                parse_args()
+
+        self.assertEqual(exit_context.exception.code, 0)
+        help_text = stdout.getvalue()
+        self.assertIn("--max-total-train-frames", help_text)
+        self.assertIn("--max-total-heldout-frames", help_text)
+        self.assertGreaterEqual(help_text.count("0 表示 full ceiling"), 2)
+
     def test_main_forwards_memory_control_arguments(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             output_path = os.path.join(temp_dir, "vq_codebook.pt")
@@ -17,6 +32,7 @@ class FitVQCodebookStreamingCLITest(unittest.TestCase):
                 "--output-path", output_path,
                 "--device", "cpu",
                 "--num-codes", "4",
+                "--muq-cache-dir", "/tmp/muq_cache",
                 "--muq-chunk-seconds", "8",
                 "--distance-chunk-size", "16",
             ]
@@ -35,6 +51,7 @@ class FitVQCodebookStreamingCLITest(unittest.TestCase):
 
             train_codebook_mock.assert_called_once()
             call_kwargs = train_codebook_mock.call_args.kwargs
+            self.assertEqual(call_kwargs["muq_cache_dir"], "/tmp/muq_cache")
             self.assertEqual(call_kwargs["muq_chunk_seconds"], 8.0)
             self.assertEqual(call_kwargs["distance_chunk_size"], 16)
 

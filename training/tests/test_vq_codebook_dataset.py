@@ -132,6 +132,48 @@ class VQCodebookDatasetTest(unittest.TestCase):
         self.assertTrue(any("songs" in payload for payload in progress.postfixes))
         self.assertTrue(any("audio" in payload for payload in progress.postfixes))
 
+    def test_collect_embedding_samples_treats_zero_budget_as_full_ceiling(self):
+        progress_bars = []
+
+        def fake_tqdm(*args, **kwargs):
+            bar = _FakeProgress(*args, **kwargs)
+            progress_bars.append(bar)
+            return bar
+
+        fake_torchaudio = types.SimpleNamespace(
+            load=lambda _path: (torch.ones(1, 48_000), 48_000),
+            transforms=types.SimpleNamespace(Resample=lambda _src, _dst: lambda wav: wav),
+        )
+        fake_extract_sketch = types.SimpleNamespace(
+            extract_muq_embeddings=lambda _model, _wav, _sr: torch.arange(6, dtype=torch.float32).view(1, 3, 2),
+        )
+
+        with mock.patch("training.preprocess.vq_codebook_dataset.tqdm", side_effect=fake_tqdm), mock.patch.dict(
+            sys.modules,
+            {
+                "torchaudio": fake_torchaudio,
+                "training.preprocess.extract_sketch": fake_extract_sketch,
+            },
+        ):
+            samples = collect_embedding_samples(
+                audio_paths=["/tmp/song_a.flac", "/tmp/song_b.flac", "/tmp/song_c.flac"],
+                muq_model=object(),
+                sample_rate=48_000,
+                target_fps=3,
+                frames_per_audio=3,
+                max_total_frames=0,
+                seed=0,
+                progress_desc="[1/5] Collecting train MuQ frames",
+            )
+
+        self.assertEqual(tuple(samples.shape), (9, 2))
+        self.assertEqual(len(progress_bars), 1)
+        progress = progress_bars[0]
+        self.assertIsNone(progress.kwargs["total"])
+        self.assertEqual(progress.kwargs["unit"], "frame")
+        self.assertEqual(progress.updates, [3, 3, 3])
+        self.assertTrue(any(payload.get("frames") == "9/full" for payload in progress.postfixes))
+
 
 if __name__ == "__main__":
     unittest.main()

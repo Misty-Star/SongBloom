@@ -18,7 +18,6 @@ import traceback
 import typing as tp
 
 import torch
-import torch.nn.functional as F
 import torchaudio
 
 from .align_lyrics import process_item as process_alignment_item
@@ -38,6 +37,7 @@ from .common import (
     write_jsonl,
 )
 from .extract_prompt import choose_prompt_window
+from .muq_feature_cache import get_or_compute_muq_embedding
 from .extract_structure import (
     collect_songformer_runtime_issues,
     prepare_structure_assets,
@@ -275,22 +275,17 @@ class FeatureExtractorBundle:
         wav: tp.Optional[torch.Tensor] = None,
         sample_rate: tp.Optional[int] = None,
     ) -> torch.Tensor:
-        from .extract_sketch import extract_muq_embeddings
-
-        if wav is None:
-            wav, sr = torchaudio.load(audio_path)
-        else:
-            sr = sample_rate or self.args.sample_rate
-        if sr != self.args.sample_rate:
-            wav = torchaudio.transforms.Resample(sr, self.args.sample_rate)(wav)
-        embeddings = extract_muq_embeddings(self.muq, wav, self.args.sample_rate)
-        target_frames = int(wav.shape[-1] / self.args.sample_rate * self.args.target_fps)
-        if embeddings.shape[1] != target_frames:
-            embeddings = F.interpolate(
-                embeddings.transpose(1, 2),
-                size=target_frames,
-                mode="nearest",
-            ).transpose(1, 2)
+        embeddings = get_or_compute_muq_embedding(
+            audio_path=audio_path,
+            muq_model=self.muq,
+            muq_model_name=self.args.muq_model,
+            sample_rate=self.args.sample_rate,
+            target_fps=self.args.target_fps,
+            cache_dir=getattr(self.args, "muq_cache_dir", ""),
+            muq_chunk_seconds=getattr(self.args, "muq_chunk_seconds", 0.0),
+            wav=wav,
+            wav_sample_rate=sample_rate or self.args.sample_rate,
+        )
         with torch.no_grad():
             sketch_tokens = self.vq.encode(embeddings)
         return sketch_tokens.squeeze(0).cpu()
@@ -560,7 +555,7 @@ def process_sample(item: dict, args, features: FeatureExtractorBundle, sample_in
         sample_tag,
         "sketch",
         lambda: features.extract_sketch(
-            standardized_audio.path,
+            get_audio_path(item),
             wav=standardized_audio.wav,
             sample_rate=standardized_audio.sample_rate,
         ),
@@ -662,6 +657,8 @@ def main() -> None:
     parser.add_argument("--vae-ckpt", type=str, default="pretrained/autoencoder_music_dsp1920.ckpt")
     parser.add_argument("--vq-ckpt", type=str, required=True)
     parser.add_argument("--muq-model", type=str, default="OpenMuQ/MuQ-large-msd-iter")
+    parser.add_argument("--muq-cache-dir", type=str, default="", help="可选，每首歌 MuQ embedding 的共享缓存目录")
+    parser.add_argument("--muq-chunk-seconds", type=float, default=0.0, help="可选，MuQ 提取分块秒数，0 表示不分块")
     args = parser.parse_args()
 
     args.output_dir = ensure_dir(args.output_dir)

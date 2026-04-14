@@ -2,6 +2,7 @@ import importlib
 import os
 import sys
 import tempfile
+import types
 import unittest
 from types import ModuleType
 from types import SimpleNamespace
@@ -101,6 +102,50 @@ class BuildDatasetAudioReuseTest(unittest.TestCase):
 
         self.assertEqual(tuple(result.shape), (4, 6))
         self.assertFalse(build_dataset.torchaudio.load.called)
+
+    def test_extract_sketch_reuses_cached_muq_embedding_without_recomputing(self):
+        build_dataset = import_build_dataset_with_mocked_torchaudio()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = os.path.join(temp_dir, "full_audio.flac")
+            with open(audio_path, "wb") as handle:
+                handle.write(b"fake-audio")
+
+            args = SimpleNamespace(
+                vae_cfg="vae.json",
+                vae_ckpt="vae.ckpt",
+                sample_rate=48000,
+                device="cpu",
+                muq_model="fake-muq",
+                vq_ckpt="vq.pt",
+                target_fps=25,
+                muq_cache_dir=os.path.join(temp_dir, "muq_cache"),
+                muq_chunk_seconds=0.0,
+            )
+            bundle = build_dataset.FeatureExtractorBundle(args)
+            bundle._muq = mock.Mock()
+            bundle._vq = mock.Mock()
+            bundle._vq.encode.side_effect = lambda embeddings: torch.arange(embeddings.shape[1], dtype=torch.long).unsqueeze(0)
+
+            wav = torch.ones(2, 48000)
+            fake_extract_sketch = ModuleType("training.preprocess.extract_sketch")
+            fake_extract_sketch.extract_muq_embeddings = mock.Mock(return_value=torch.ones(1, 25, 8))
+            fake_torchaudio = types.SimpleNamespace(
+                load=lambda _path: (torch.ones(1, 48_000), 48_000),
+                transforms=types.SimpleNamespace(Resample=lambda _src, _dst: lambda wave: wave),
+            )
+            with mock.patch.dict(
+                sys.modules,
+                {
+                    "training.preprocess.extract_sketch": fake_extract_sketch,
+                    "torchaudio": fake_torchaudio,
+                },
+            ):
+                first = bundle.extract_sketch(audio_path, wav=wav, sample_rate=48000)
+                second = bundle.extract_sketch(audio_path, wav=wav, sample_rate=48000)
+
+        self.assertEqual(fake_extract_sketch.extract_muq_embeddings.call_count, 1)
+        self.assertTrue(torch.equal(first, second))
 
     def test_extract_sketch_uses_preloaded_waveform_without_loading_from_disk(self):
         build_dataset = import_build_dataset_with_mocked_torchaudio()

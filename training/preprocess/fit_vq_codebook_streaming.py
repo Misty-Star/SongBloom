@@ -50,8 +50,9 @@ def train_codebook(
     train_steps: int,
     refresh_every: int,
     seed: int,
-    muq_chunk_seconds: float,
-    distance_chunk_size: int,
+    muq_cache_dir: str = "",
+    muq_chunk_seconds: float = 0.0,
+    distance_chunk_size: int = 0,
 ) -> dict:
     if not audio_paths:
         raise RuntimeError("No audio files found for streaming VQ codebook fitting.")
@@ -67,6 +68,8 @@ def train_codebook(
         frames_per_audio=frames_per_audio,
         max_total_frames=max_total_train_frames,
         seed=seed,
+        muq_model_name=muq_model_name,
+        cache_dir=muq_cache_dir,
         muq_chunk_seconds=muq_chunk_seconds,
         progress_desc="[1/5] Collecting train MuQ frames",
     )
@@ -83,6 +86,8 @@ def train_codebook(
             frames_per_audio=frames_per_audio,
             max_total_frames=max_total_heldout_frames,
             seed=seed + 1,
+            muq_model_name=muq_model_name,
+            cache_dir=muq_cache_dir,
             muq_chunk_seconds=muq_chunk_seconds,
             progress_desc="[2/5] Collecting heldout MuQ frames",
         )
@@ -173,8 +178,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--muq-model", type=str, default="OpenMuQ/MuQ-large-msd-iter")
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--frames-per-audio", type=int, default=512)
-    parser.add_argument("--max-total-train-frames", type=int, default=200000)
-    parser.add_argument("--max-total-heldout-frames", type=int, default=50000)
+    parser.add_argument("--muq-cache-dir", type=str, default="", help="可选，每首歌 MuQ embedding 的共享缓存目录")
+    parser.add_argument(
+        "--max-total-train-frames",
+        type=int,
+        default=200000,
+        help="训练 split 的 frame budget 上限，0 表示 full ceiling",
+    )
+    parser.add_argument(
+        "--max-total-heldout-frames",
+        type=int,
+        default=50000,
+        help="heldout split 的 frame budget 上限，0 表示 full ceiling",
+    )
     parser.add_argument("--num-codes", type=int, default=16384)
     parser.add_argument("--heldout-ratio", type=float, default=0.1)
     parser.add_argument("--batch-size", type=int, default=1024)
@@ -210,6 +226,7 @@ def main() -> None:
         train_steps=args.train_steps,
         refresh_every=args.refresh_every,
         seed=args.seed,
+        muq_cache_dir=args.muq_cache_dir,
         muq_chunk_seconds=args.muq_chunk_seconds,
         distance_chunk_size=args.distance_chunk_size,
     )
