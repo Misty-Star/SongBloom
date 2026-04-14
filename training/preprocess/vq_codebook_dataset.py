@@ -11,7 +11,6 @@ import torch
 from tqdm import tqdm
 
 from .muq_feature_cache import (
-    DEFAULT_MUQ_MIN_CHUNK_SECONDS,
     align_embeddings_to_target_fps,
     build_chunk_spans,
     get_or_compute_muq_embedding,
@@ -28,6 +27,13 @@ def _short_audio_label(audio_path: str, limit: int = 32) -> str:
         return label
     return "..." + label[-(limit - 3):]
 
+
+def _progress_write(progress, message: str) -> None:
+    writer = getattr(progress, "write", None)
+    if callable(writer):
+        writer(message)
+        return
+    print(message)
 
 
 def load_manifest_audio_paths(path: str) -> list[str]:
@@ -106,9 +112,11 @@ def collect_embedding_samples(
     cache_dir: str = "",
     muq_chunk_seconds: float = 0.0,
     progress_desc: str = "Collecting MuQ frames",
+    stats: tp.Optional[dict[str, tp.Any]] = None,
 ) -> torch.Tensor:
     rng = random.Random(seed)
     collected: list[torch.Tensor] = []
+    skipped_audio_paths: list[str] = []
     total_frames = 0
     songs_used = 0
     use_full_ceiling = max_total_frames <= 0
@@ -117,46 +125,83 @@ def collect_embedding_samples(
     with tqdm(total=None if use_full_ceiling else max_total_frames, desc=progress_desc, unit="frame") as progress:
         for audio_path in audio_paths:
             audio_label = _short_audio_label(audio_path)
-            progress.set_postfix(songs=songs_used, audio=audio_label)
-
-            embedding = get_or_compute_muq_embedding(
-                audio_path=audio_path,
-                muq_model=muq_model,
-                muq_model_name=muq_model_name or type(muq_model).__name__,
-                sample_rate=sample_rate,
-                target_fps=target_fps,
-                cache_dir=cache_dir,
-                muq_chunk_seconds=muq_chunk_seconds,
-                progress_postfix=lambda payload, audio_label=audio_label, songs_used=songs_used: progress.set_postfix(
-                    songs=songs_used,
-                    audio=audio_label,
-                    **payload,
-                ),
-            )
-
-            sampled = sample_frames_from_embedding(embedding, frames_per_audio, rng)
-            if sampled.numel() == 0:
-                continue
-
-            if not use_full_ceiling:
-                remaining = max_total_frames - total_frames
-                if remaining <= 0:
-                    break
-                if sampled.shape[0] > remaining:
-                    sampled = sampled[:remaining]
-
-            collected.append(sampled)
-            songs_used += 1
-            total_frames += sampled.shape[0]
-            progress.update(sampled.shape[0])
+            skipped_audio_count = len(skipped_audio_paths)
             progress.set_postfix(
                 songs=songs_used,
                 audio=audio_label,
-                frames=f"{total_frames}/{frame_budget_label}",
+                skipped=skipped_audio_count,
             )
 
-            if not use_full_ceiling and total_frames >= max_total_frames:
-                break
+            try:
+                embedding = get_or_compute_muq_embedding(
+                    audio_path=audio_path,
+                    muq_model=muq_model,
+                    muq_model_name=muq_model_name or type(muq_model).__name__,
+                    sample_rate=sample_rate,
+                    target_fps=target_fps,
+                    cache_dir=cache_dir,
+                    muq_chunk_seconds=muq_chunk_seconds,
+                    progress_postfix=lambda payload, audio_label=audio_label, songs_used=songs_used, skipped_audio_count=skipped_audio_count: progress.set_postfix(
+                        songs=songs_used,
+                        audio=audio_label,
+                        skipped=skipped_audio_count,
+                        **payload,
+                    ),
+                )
+
+                sampled = sample_frames_from_embedding(embedding, frames_per_audio, rng)
+                if sampled.numel() == 0:
+                    continue
+
+                if not use_full_ceiling:
+                    remaining = max_total_frames - total_frames
+                    if remaining <= 0:
+                        break
+                    if sampled.shape[0] > remaining:
+                        sampled = sampled[:remaining]
+
+                collected.append(sampled)
+                songs_used += 1
+                total_frames += sampled.shape[0]
+                progress.update(sampled.shape[0])
+                progress.set_postfix(
+                    songs=songs_used,
+                    audio=audio_label,
+                    frames=f"{total_frames}/{frame_budget_label}",
+                    skipped=len(skipped_audio_paths),
+                )
+
+                if not use_full_ceiling and total_frames >= max_total_frames:
+                    break
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                skipped_audio_paths.append(audio_path)
+                _progress_write(
+                    progress,
+                    (
+                        "[warn] Skipping failed audio while collecting MuQ frames: "
+                        f"{audio_path} ({exc})"
+                    ),
+                )
+                progress.set_postfix(
+                    songs=songs_used,
+                    audio=audio_label,
+                    skipped=len(skipped_audio_paths),
+                )
+                continue
+
+    if stats is not None:
+        stats.clear()
+        stats.update(
+            {
+                "requested_audio_files": len(audio_paths),
+                "used_audio_files": songs_used,
+                "skipped_audio_files": len(skipped_audio_paths),
+                "skipped_audio_examples": skipped_audio_paths[:20],
+                "collected_frames": total_frames,
+            }
+        )
 
     if not collected:
         raise RuntimeError("No MuQ embedding frames collected; check audio input and MuQ setup.")

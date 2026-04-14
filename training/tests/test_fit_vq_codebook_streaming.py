@@ -178,12 +178,39 @@ class FitVQCodebookStreamingCLITest(unittest.TestCase):
 
         from training.preprocess.fit_vq_codebook_streaming import train_codebook
 
+        def fake_collect_embedding_samples(**kwargs):
+            stats = kwargs.get("stats")
+            if kwargs["progress_desc"] == "[1/5] Collecting train MuQ frames":
+                if stats is not None:
+                    stats.update(
+                        {
+                            "requested_audio_files": 3,
+                            "used_audio_files": 2,
+                            "skipped_audio_files": 1,
+                            "skipped_audio_examples": ["/tmp/bad_train.flac"],
+                            "collected_frames": 4,
+                        }
+                    )
+                return fake_train_frames
+
+            if stats is not None:
+                stats.update(
+                    {
+                        "requested_audio_files": 1,
+                        "used_audio_files": 1,
+                        "skipped_audio_files": 0,
+                        "skipped_audio_examples": [],
+                        "collected_frames": 2,
+                    }
+                )
+            return fake_heldout_frames
+
         with mock.patch(
             "training.preprocess.fit_vq_codebook_streaming.load_muq_model",
             return_value=mock.Mock(),
         ), mock.patch(
             "training.preprocess.fit_vq_codebook_streaming.collect_embedding_samples",
-            side_effect=[fake_train_frames, fake_heldout_frames],
+            side_effect=fake_collect_embedding_samples,
         ) as collect_mock, mock.patch(
             "training.preprocess.fit_vq_codebook_streaming.StreamingKMeans",
             return_value=trainer,
@@ -195,10 +222,10 @@ class FitVQCodebookStreamingCLITest(unittest.TestCase):
             ],
         ) as evaluate_mock, mock.patch(
             "training.preprocess.fit_vq_codebook_streaming.save_codebook",
-        ), mock.patch(
+        ) as save_codebook_mock, mock.patch(
             "training.preprocess.fit_vq_codebook_streaming.save_report",
-        ):
-            train_codebook(
+        ) as save_report_mock:
+            report = train_codebook(
                 audio_paths=["/tmp/song_0.flac", "/tmp/song_1.flac", "/tmp/song_2.flac", "/tmp/song_3.flac"],
                 output_path="/tmp/vq_codebook.pt",
                 muq_model_name="fake-muq",
@@ -236,6 +263,12 @@ class FitVQCodebookStreamingCLITest(unittest.TestCase):
                 "[5/5] Evaluating heldout split",
             ],
         )
+        self.assertEqual(report["metadata"]["num_train_audio_files_used"], 2)
+        self.assertEqual(report["metadata"]["num_train_audio_files_skipped"], 1)
+        self.assertEqual(report["data_collection"]["train"]["skipped_audio_examples"], ["/tmp/bad_train.flac"])
+        self.assertEqual(report["data_collection"]["heldout"]["used_audio_files"], 1)
+        self.assertEqual(save_codebook_mock.call_count, 1)
+        self.assertEqual(save_report_mock.call_count, 1)
 
 
 if __name__ == "__main__":

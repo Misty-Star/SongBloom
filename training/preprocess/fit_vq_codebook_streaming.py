@@ -59,6 +59,8 @@ def train_codebook(
 
     train_audio_paths, heldout_audio_paths = split_audio_paths(audio_paths, heldout_ratio, seed)
     muq_model = load_muq_model(muq_model_name, device)
+    train_collection_stats: dict[str, object] = {}
+    heldout_collection_stats: dict[str, object] = {}
 
     train_frames = collect_embedding_samples(
         audio_paths=train_audio_paths,
@@ -72,6 +74,7 @@ def train_codebook(
         cache_dir=muq_cache_dir,
         muq_chunk_seconds=muq_chunk_seconds,
         progress_desc="[1/5] Collecting train MuQ frames",
+        stats=train_collection_stats,
     )
     if train_frames.shape[0] < num_codes:
         raise ValueError(f"Need at least {num_codes} sampled frames, but only got {train_frames.shape[0]}.")
@@ -90,6 +93,7 @@ def train_codebook(
             cache_dir=muq_cache_dir,
             muq_chunk_seconds=muq_chunk_seconds,
             progress_desc="[2/5] Collecting heldout MuQ frames",
+            stats=heldout_collection_stats,
         )
 
     del muq_model
@@ -122,6 +126,10 @@ def train_codebook(
         "num_audio_files": len(audio_paths),
         "num_train_audio_files": len(train_audio_paths),
         "num_heldout_audio_files": len(heldout_audio_paths),
+        "num_train_audio_files_used": int(train_collection_stats.get("used_audio_files", 0)),
+        "num_train_audio_files_skipped": int(train_collection_stats.get("skipped_audio_files", 0)),
+        "num_heldout_audio_files_used": int(heldout_collection_stats.get("used_audio_files", 0)),
+        "num_heldout_audio_files_skipped": int(heldout_collection_stats.get("skipped_audio_files", 0)),
         "num_train_frames": int(train_frames.shape[0]),
         "num_heldout_frames": int(heldout_frames.shape[0]) if heldout_frames is not None else 0,
         "muq_model": muq_model_name,
@@ -157,6 +165,10 @@ def train_codebook(
     report = {
         "codebook_path": output_path,
         "metadata": metadata,
+        "data_collection": {
+            "train": train_collection_stats,
+            "heldout": heldout_collection_stats,
+        },
         "train_metrics": train_metrics,
         "heldout_metrics": heldout_metrics,
     }

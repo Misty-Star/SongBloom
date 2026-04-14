@@ -1,6 +1,4 @@
 import random
-import sys
-import types
 import unittest
 from unittest import mock
 
@@ -21,6 +19,7 @@ class _FakeProgress:
         self.kwargs = kwargs
         self.updates = []
         self.postfixes = []
+        self.messages = []
         self.closed = False
 
     def update(self, value=1):
@@ -30,6 +29,9 @@ class _FakeProgress:
         payload = dict(ordered_dict or {})
         payload.update(kwargs)
         self.postfixes.append(payload)
+
+    def write(self, message):
+        self.messages.append(message)
 
     def close(self):
         self.closed = True
@@ -97,20 +99,11 @@ class VQCodebookDatasetTest(unittest.TestCase):
             progress_bars.append(bar)
             return bar
 
-        fake_torchaudio = types.SimpleNamespace(
-            load=lambda _path: (torch.ones(1, 48_000), 48_000),
-            transforms=types.SimpleNamespace(Resample=lambda _src, _dst: lambda wav: wav),
-        )
-        fake_extract_sketch = types.SimpleNamespace(
-            extract_muq_embeddings=lambda _model, _wav, _sr: torch.arange(6, dtype=torch.float32).view(1, 3, 2),
-        )
+        fake_embedding = torch.arange(6, dtype=torch.float32).view(1, 3, 2)
 
-        with mock.patch("training.preprocess.vq_codebook_dataset.tqdm", side_effect=fake_tqdm), mock.patch.dict(
-            sys.modules,
-            {
-                "torchaudio": fake_torchaudio,
-                "training.preprocess.extract_sketch": fake_extract_sketch,
-            },
+        with mock.patch("training.preprocess.vq_codebook_dataset.tqdm", side_effect=fake_tqdm), mock.patch(
+            "training.preprocess.vq_codebook_dataset.get_or_compute_muq_embedding",
+            return_value=fake_embedding,
         ):
             samples = collect_embedding_samples(
                 audio_paths=["/tmp/song_a.flac", "/tmp/song_b.flac", "/tmp/song_c.flac"],
@@ -131,6 +124,7 @@ class VQCodebookDatasetTest(unittest.TestCase):
         self.assertEqual(progress.updates, [3, 3])
         self.assertTrue(any("songs" in payload for payload in progress.postfixes))
         self.assertTrue(any("audio" in payload for payload in progress.postfixes))
+        self.assertTrue(all(payload.get("skipped", 0) == 0 for payload in progress.postfixes))
 
     def test_collect_embedding_samples_treats_zero_budget_as_full_ceiling(self):
         progress_bars = []
@@ -140,20 +134,11 @@ class VQCodebookDatasetTest(unittest.TestCase):
             progress_bars.append(bar)
             return bar
 
-        fake_torchaudio = types.SimpleNamespace(
-            load=lambda _path: (torch.ones(1, 48_000), 48_000),
-            transforms=types.SimpleNamespace(Resample=lambda _src, _dst: lambda wav: wav),
-        )
-        fake_extract_sketch = types.SimpleNamespace(
-            extract_muq_embeddings=lambda _model, _wav, _sr: torch.arange(6, dtype=torch.float32).view(1, 3, 2),
-        )
+        fake_embedding = torch.arange(6, dtype=torch.float32).view(1, 3, 2)
 
-        with mock.patch("training.preprocess.vq_codebook_dataset.tqdm", side_effect=fake_tqdm), mock.patch.dict(
-            sys.modules,
-            {
-                "torchaudio": fake_torchaudio,
-                "training.preprocess.extract_sketch": fake_extract_sketch,
-            },
+        with mock.patch("training.preprocess.vq_codebook_dataset.tqdm", side_effect=fake_tqdm), mock.patch(
+            "training.preprocess.vq_codebook_dataset.get_or_compute_muq_embedding",
+            return_value=fake_embedding,
         ):
             samples = collect_embedding_samples(
                 audio_paths=["/tmp/song_a.flac", "/tmp/song_b.flac", "/tmp/song_c.flac"],
@@ -173,6 +158,50 @@ class VQCodebookDatasetTest(unittest.TestCase):
         self.assertEqual(progress.kwargs["unit"], "frame")
         self.assertEqual(progress.updates, [3, 3, 3])
         self.assertTrue(any(payload.get("frames") == "9/full" for payload in progress.postfixes))
+
+    def test_collect_embedding_samples_skips_bad_audio_and_records_stats(self):
+        progress_bars = []
+        stats = {}
+
+        def fake_tqdm(*args, **kwargs):
+            bar = _FakeProgress(*args, **kwargs)
+            progress_bars.append(bar)
+            return bar
+
+        def fake_get_or_compute_muq_embedding(*, audio_path, progress_postfix=None, **kwargs):
+            self.assertIsNotNone(progress_postfix)
+            if audio_path.endswith("bad.flac"):
+                raise RuntimeError("corrupted audio")
+            progress_postfix({"chunk": "1/1"})
+            return torch.arange(6, dtype=torch.float32).view(1, 3, 2)
+
+        with mock.patch("training.preprocess.vq_codebook_dataset.tqdm", side_effect=fake_tqdm), mock.patch(
+            "training.preprocess.vq_codebook_dataset.get_or_compute_muq_embedding",
+            side_effect=fake_get_or_compute_muq_embedding,
+        ):
+            samples = collect_embedding_samples(
+                audio_paths=["/tmp/fallback.flac", "/tmp/bad.flac", "/tmp/good.flac"],
+                muq_model=object(),
+                sample_rate=48_000,
+                target_fps=3,
+                frames_per_audio=3,
+                max_total_frames=6,
+                seed=0,
+                progress_desc="[1/5] Collecting train MuQ frames",
+                stats=stats,
+            )
+
+        self.assertEqual(tuple(samples.shape), (6, 2))
+        self.assertEqual(stats["requested_audio_files"], 3)
+        self.assertEqual(stats["used_audio_files"], 2)
+        self.assertEqual(stats["skipped_audio_files"], 1)
+        self.assertEqual(stats["skipped_audio_examples"], ["/tmp/bad.flac"])
+        self.assertEqual(stats["collected_frames"], 6)
+        self.assertEqual(len(progress_bars), 1)
+        self.assertTrue(
+            any("Skipping failed audio while collecting MuQ frames" in message for message in progress_bars[0].messages)
+        )
+        self.assertTrue(any(payload.get("skipped") == 1 for payload in progress_bars[0].postfixes))
 
 
 if __name__ == "__main__":

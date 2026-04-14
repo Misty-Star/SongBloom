@@ -15,6 +15,29 @@ DEFAULT_MUQ_MIN_CHUNK_SECONDS = 10.0
 MUQ_CACHE_VERSION = 1
 
 
+def load_audio_with_fallback(audio_path: str) -> tuple[torch.Tensor, int]:
+    import torchaudio
+
+    try:
+        return torchaudio.load(audio_path)
+    except KeyboardInterrupt:
+        raise
+    except Exception as torchaudio_exc:
+        try:
+            import soundfile as sf
+
+            wav, sr = sf.read(audio_path, always_2d=True, dtype="float32")
+        except KeyboardInterrupt:
+            raise
+        except Exception as soundfile_exc:
+            raise RuntimeError(
+                f"torchaudio.load failed: {torchaudio_exc}; soundfile.read failed: {soundfile_exc}"
+            ) from soundfile_exc
+
+        wav_tensor = torch.from_numpy(wav).transpose(0, 1).contiguous()
+        return wav_tensor, int(sr)
+
+
 def align_embeddings_to_target_fps(
     embedding: torch.Tensor,
     audio_num_samples: int,
@@ -153,9 +176,7 @@ def _compute_aligned_embedding(
     from .extract_sketch import extract_muq_embeddings
 
     if wav is None:
-        import torchaudio
-
-        wav, sr = torchaudio.load(audio_path)
+        wav, sr = load_audio_with_fallback(audio_path)
     else:
         sr = wav_sample_rate or sample_rate
     if sr != sample_rate:
